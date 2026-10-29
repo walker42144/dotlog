@@ -38,10 +38,9 @@ export function TitleBar({
     return () => unlisten?.();
   }, []);
 
+  // 不乐观更新：调用失败时图标保持原样，成功时由 resize 回调同步真实状态。
   const toggleFullscreen = () => {
-    const next = !fullscreen;
-    setFullscreen(next);
-    void windowControls.setFullscreen(next);
+    void windowControls.setFullscreen(!fullscreen);
   };
 
   return (

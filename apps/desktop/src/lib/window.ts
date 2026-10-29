@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -13,10 +13,13 @@ export const windowControls = {
     IS_TAURI ? getCurrentWindow().setFullscreen(flag) : Promise.resolve(),
   isFullscreen: (): Promise<boolean> =>
     IS_TAURI ? getCurrentWindow().isFullscreen() : Promise.resolve(false),
+  // Tauri 没有独立的 fullscreen 事件，全屏切换会触发 resize，借此同步状态。
   onFullscreenChange: (cb: (fullscreen: boolean) => void): Promise<UnlistenFn | undefined> =>
     IS_TAURI
-      ? listen<boolean>("tauri://fullscreen-changed", (event) => cb(event.payload)).then(
-          (unlisten) => unlisten
-        )
+      ? getCurrentWindow().onResized(() => {
+          void getCurrentWindow()
+            .isFullscreen()
+            .then(cb);
+        })
       : Promise.resolve(undefined)
 };
