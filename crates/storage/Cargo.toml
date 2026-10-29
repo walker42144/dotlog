@@ -1,0 +1,19 @@
+[package]
+name = "dotlog-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "DotLog 持久层：SQLite 迁移与仓储实现"
+
+[dependencies]
+dotlog-domain = { path = "../domain" }
+dotlog-application = { path = "../application" }
+rusqlite.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

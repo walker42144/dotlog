@@ -1,0 +1,19 @@
+[package]
+name = "dotlog-tomatodo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "DotLog 番茄Todo 集成：读取本机番茄Todo JSON，把专注记录增量导入为 DotLog 段"
+
+[dependencies]
+dotlog-plugin-sdk = { path = "../plugin-sdk" }
+dotlog-application = { path = "../application" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

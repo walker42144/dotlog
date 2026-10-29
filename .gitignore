@@ -1,0 +1,23 @@
+# Rust
+/target
+
+# Node
+node_modules/
+dist/
+
+# Tauri
+apps/desktop/src-tauri/target
+
+# 本地数据与日志
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 开发期截图与本机环境报告（不公开）
+.shots/
+docs/design-toolchain-install-report.md

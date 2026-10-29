@@ -1,0 +1,104 @@
+/* DotLog 设计 token（对齐 docs/ui-spec.md §7）：颜色、字号、间距、圆角全部走变量。 */
+
+:root {
+  color-scheme: light;
+
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Consolas", "SF Mono", ui-monospace, monospace;
+
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 20px;
+  --text-xl: 40px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-pill: 999px;
+
+  --titlebar-h: 44px;
+  --sidebar-w: 196px;
+  --aside-w: 280px;
+  --content-max: 920px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+
+  --surface: #fafafa;
+  --surface-muted: #f4f4f5;
+  --surface-raised: #ffffff;
+  --surface-hover: #efeff1;
+  --text: #111827;
+  --text-muted: #6b7280;
+  --text-faint: #71717a;
+  --border: #e5e7eb;
+  --border-strong: #d4d4d8;
+  --brand: #0f766e;
+  --brand-hover: #0b5f58;
+  --brand-soft: #e6f4f1;
+  --brand-contrast: #ffffff;
+  --danger: #dc2626;
+  --danger-soft: #fef2f2;
+  --danger-control-bg: #dc2626;
+  --on-danger: #ffffff;
+  --focus: #0f766e;
+  --scrim: rgba(17, 24, 39, 0.28);
+
+  --shadow-card: 0 1px 2px rgba(17, 24, 39, 0.04);
+  --shadow-pop: 0 8px 24px rgba(17, 24, 39, 0.12);
+
+  /* 分类色板：学习 / 工作 / 生活 / 运动 / 阅读 / 娱乐 / 睡眠 / 其它 */
+  --cat-1: #2563eb;
+  --cat-2: #0f766e;
+  --cat-3: #b45309;
+  --cat-4: #15803d;
+  --cat-5: #7c3aed;
+  --cat-6: #be185d;
+  --cat-7: #475569;
+  --cat-8: #6b7280;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface: #0b0f0e;
+  --surface-muted: #121817;
+  --surface-raised: #16201e;
+  --surface-hover: #1c2725;
+  --text: #e8eeec;
+  --text-muted: #94a3b8;
+  --text-faint: #7d8b9c;
+  --border: #24302e;
+  --border-strong: #33413e;
+  --brand: #2dd4bf;
+  --brand-hover: #5eead4;
+  --brand-soft: #10312c;
+  --brand-contrast: #04201c;
+  --danger: #f87171;
+  --danger-soft: #2a1517;
+  --danger-control-bg: #b91c1c;
+  --on-danger: #ffffff;
+  --focus: #2dd4bf;
+  --scrim: rgba(0, 0, 0, 0.55);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  --cat-1: #60a5fa;
+  --cat-2: #2dd4bf;
+  --cat-3: #fbbf24;
+  --cat-4: #4ade80;
+  --cat-5: #a78bfa;
+  --cat-6: #f472b6;
+  --cat-7: #94a3b8;
+  --cat-8: #cbd5e1;
+}

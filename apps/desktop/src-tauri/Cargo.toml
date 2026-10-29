@@ -1,0 +1,33 @@
+[package]
+name = "dotlog-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "DotLog 桌面端：Tauri 2 外壳与 IPC 命令"
+
+[lib]
+name = "dotlog_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dotlog-domain = { path = "../../../crates/domain" }
+dotlog-application = { path = "../../../crates/application" }
+dotlog-storage = { path = "../../../crates/storage" }
+dotlog-plugin-sdk = { path = "../../../crates/plugin-sdk" }
+dotlog-plugin-host = { path = "../../../crates/plugin-host" }
+dotlog-memos = { path = "../../../crates/memos" }
+dotlog-ai = { path = "../../../crates/ai" }
+dotlog-tomatodo = { path = "../../../crates/tomatodo" }
+tauri = { version = "2", features = ["tray-icon"] }
+serde.workspace = true
+serde_json.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "dotlog-plugin-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "DotLog 插件宿主：注册启停、能力裁决、超时与 panic 隔离、outbox 调度"
+
+[dependencies]
+dotlog-plugin-sdk = { path = "../plugin-sdk" }
+dotlog-application = { path = "../application" }
+dotlog-domain = { path = "../domain" }
+serde_json.workspace = true
+thiserror.workspace = true
+# 轻量同步 HTTP 客户端（rustls TLS）；插件网络能力与 Memos/AI 发布共用。
+ureq = { version = "2", default-features = false, features = ["tls", "json", "gzip"] }
+# 令牌进系统钥匙串（Windows Credential Manager），符合架构文档 §11。
+keyring = { version = "3", features = ["windows-native"] }
+
+[lints]
+workspace = true

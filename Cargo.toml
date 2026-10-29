@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v7"] }
+serde_json = "1"
+tempfile = "3"
+# 本地时区时间格式化（Memos 发布内容、集成页时间戳）。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

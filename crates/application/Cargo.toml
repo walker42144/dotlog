@@ -1,0 +1,16 @@
+[package]
+name = "dotlog-application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "DotLog 应用层：用例编排、端口定义与事务边界"
+
+[dependencies]
+dotlog-domain = { path = "../domain" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

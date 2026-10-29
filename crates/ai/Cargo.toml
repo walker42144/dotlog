@@ -1,0 +1,17 @@
+[package]
+name = "dotlog-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "DotLog AI 助手集成：OpenAI 兼容分类建议（隐私三模式，建议不落库）"
+
+[dependencies]
+dotlog-plugin-sdk = { path = "../plugin-sdk" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# 本地时刻格式化（隐私载荷中的起止时间）。
+chrono.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "dotlog-domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "DotLog 领域模型与计时状态机（零外部实现依赖）"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
