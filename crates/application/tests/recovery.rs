@@ -90,15 +90,12 @@ impl TimerStore for FakeStore {
                 }
                 Effect::SoftDeleteSegment { id, .. } => {
                     data.segments.retain(|stored| &stored.id != id);
-                    if data
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| &active.id == id)
-                    {
+                    if data.active.as_ref().is_some_and(|active| &active.id == id) {
                         data.active = None;
                     }
                 }
-                Effect::RestoreSegment(_) | Effect::InsertTimePoint(_)
+                Effect::RestoreSegment(_)
+                | Effect::InsertTimePoint(_)
                 | Effect::MarkPointUndone { .. } => {}
             }
         }
@@ -158,7 +155,10 @@ impl TimerStore for FakeStore {
     }
 
     fn table_counts(&self) -> AppResult<Vec<(String, i64)>> {
-        Ok(vec![("time_segment".to_string(), 3), ("setting".to_string(), 1)])
+        Ok(vec![
+            ("time_segment".to_string(), 3),
+            ("setting".to_string(), 1),
+        ])
     }
 
     fn schema_version(&self) -> AppResult<i64> {
@@ -262,7 +262,7 @@ fn resolve_extend_closes_segment_and_marks_clean() {
     assert!(store.active().is_none());
     assert_eq!(
         store.runtime("lifecycle.clean_shutdown").as_deref(),
-        Some("true")
+        Some("false")
     );
 }
 

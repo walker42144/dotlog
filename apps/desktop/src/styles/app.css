@@ -1068,7 +1068,7 @@ kbd {
   inset: 0;
   z-index: 49;
   background: var(--scrim);
-  animation: toast-in var(--duration-fast) var(--ease);
+  animation: modal-scrim-in var(--duration-fast) var(--ease);
 }
 
 .modal {
@@ -1088,7 +1088,7 @@ kbd {
   border-radius: var(--radius-card);
   background: var(--surface-raised);
   box-shadow: var(--shadow-pop);
-  animation: popover-in var(--duration-base) var(--ease);
+  animation: modal-center-in var(--duration-base) var(--ease);
 }
 
 .modal__head {
@@ -2762,4 +2762,10 @@ kbd {
   margin: 0;
   font-size: var(--text-sm);
   color: var(--text-faint);
+}
+
+@keyframes modal-scrim-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-center-in {
+  from { opacity: 0; transform: translate(-50%, calc(-50% + 6px)); }
+  to { opacity: 1; transform: translate(-50%, -50%); }
 }

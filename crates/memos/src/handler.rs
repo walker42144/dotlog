@@ -6,7 +6,7 @@
 use dotlog_plugin_sdk::{HttpRequest, OutboxEnv, OutboxHandler, OutboxOutcome, PluginError};
 
 use crate::endpoints::{normalize_base, publish_path, visibility_proto};
-use crate::{EVENT_TYPE, PLUGIN_ID};
+use crate::{render_content, DEFAULT_TEMPLATE, EVENT_TYPE, PLUGIN_ID};
 
 const TIMEOUT_MS: u64 = 10_000;
 
@@ -32,6 +32,36 @@ impl OutboxHandler for PublishHandler {
             return OutboxOutcome::Fail {
                 error: "payload 缺少 content".into(),
             };
+        };
+
+        let live_content;
+        let content = if let Some(query) = env.segments {
+            let segment = match query.segment_by_id(segment_id) {
+                Ok(Some(s)) if s.end_at_ms > s.start_at_ms => s,
+                Ok(_) => {
+                    return OutboxOutcome::Fail {
+                        error: "记录已撤销、删除或重新开始，已取消发布".into(),
+                    }
+                }
+                Err(e) => return retry(e.to_string()),
+            };
+            let template = env.settings.get("template");
+            let include_note = env
+                .settings
+                .get("includeNote")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            live_content = render_content(
+                &segment,
+                template
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(DEFAULT_TEMPLATE),
+                include_note,
+            );
+            live_content.as_str()
+        } else {
+            content
         };
 
         // 幂等（§6）：已发布的事件直接成功，不再发送。
@@ -123,6 +153,12 @@ impl OutboxHandler for PublishHandler {
         match http.send(request) {
             Ok(response) if response.is_success() => {
                 let external_id = memo_external_id(&response.text());
+                if external_id.is_none() {
+                    return OutboxOutcome::Fail {
+                        error: "服务未返回有效的 Memos 记录标识，未标记成功，请核对远端后重试"
+                            .into(),
+                    };
+                }
                 env.log.info(&format!("段 {segment_id} 发布成功"));
                 OutboxOutcome::Done { external_id }
             }

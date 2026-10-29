@@ -98,7 +98,6 @@ impl IntegrityReport {
     }
 }
 
-
 /// 计时持久化端口。由 `dotlog-storage` 实现，应用层不感知 SQLite。
 pub trait TimerStore: Send + Sync {
     fn snapshot(&self) -> AppResult<TimerSnapshot>;
@@ -114,6 +113,24 @@ pub trait TimerStore: Send + Sync {
 
     /// 最近一条未被撤销的时间点。
     fn last_point(&self) -> AppResult<Option<PointRecord>>;
+
+    fn session_segments(&self, id: &str) -> AppResult<Vec<Segment>> {
+        Ok(self.find_segment(id)?.into_iter().collect())
+    }
+
+    fn publication_ready(&self, _id: &str) -> AppResult<bool> {
+        Ok(true)
+    }
+    fn confirm_session(&self, _id: &str, _now_ms: i64) -> AppResult<()> {
+        Ok(())
+    }
+    fn pending_note_segment(&self) -> AppResult<Option<Segment>> {
+        Ok(None)
+    }
+
+    fn current_session_segments(&self) -> AppResult<Vec<Segment>> {
+        Ok(self.snapshot()?.active.into_iter().collect())
+    }
 
     /// 历史页查询：按开始时间倒序 + 文本模糊搜索，返回 `(当前页, 总数)`。
     fn history_segments(
@@ -208,6 +225,10 @@ pub trait TimerStore: Send + Sync {
     fn outbox_take_due(&self, now_ms: i64, limit: u32) -> AppResult<Vec<OutboxRecord>> {
         let _ = (now_ms, limit);
         Ok(Vec::new())
+    }
+
+    fn outbox_defer(&self, id: &str, due_ms: i64, now_ms: i64) -> AppResult<()> {
+        self.outbox_mark_retry(id, "插件已暂停", due_ms, now_ms)
     }
 
     fn outbox_mark_done(&self, id: &str, now_ms: i64) -> AppResult<()> {

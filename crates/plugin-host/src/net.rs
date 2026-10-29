@@ -47,6 +47,7 @@ impl HttpClient for UreqClient {
 
         let timeout = request.timeout_ms.min(self.timeout_ms).max(1);
         let agent = ureq::AgentBuilder::new()
+            .redirects(0)
             .timeout(Duration::from_millis(timeout))
             .build();
         let method = request.method.to_ascii_uppercase();
@@ -126,9 +127,18 @@ mod tests {
 
     #[test]
     fn host_of_parses_userinfo_port_and_case() {
-        assert_eq!(host_of("https://memos.example.com/api/v1/status").as_deref(), Some("memos.example.com"));
-        assert_eq!(host_of("http://user:pass@192.168.1.5:5230/memos").as_deref(), Some("192.168.1.5"));
-        assert_eq!(host_of("HTTPS://Example.COM:443/x").as_deref(), Some("example.com"));
+        assert_eq!(
+            host_of("https://memos.example.com/api/v1/status").as_deref(),
+            Some("memos.example.com")
+        );
+        assert_eq!(
+            host_of("http://user:pass@192.168.1.5:5230/memos").as_deref(),
+            Some("192.168.1.5")
+        );
+        assert_eq!(
+            host_of("HTTPS://Example.COM:443/x").as_deref(),
+            Some("example.com")
+        );
         assert_eq!(host_of("http://[::1]:5230/").as_deref(), Some("::1"));
         assert_eq!(host_of("not-a-url"), None);
         assert_eq!(host_of("https:///path"), None);

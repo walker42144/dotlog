@@ -19,7 +19,7 @@ export const windowControls = {
       ? getCurrentWindow().onResized(() => {
           void getCurrentWindow()
             .isFullscreen()
-            .then(cb);
+            .then(cb).catch(() => {});
         })
       : Promise.resolve(undefined)
 };

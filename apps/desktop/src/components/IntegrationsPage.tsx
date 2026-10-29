@@ -1,4 +1,7 @@
+import { LocalPluginManager } from "./LocalPluginManager";
+import { pluginsChanged } from "../lib/plugins";
 import { useCallback, useEffect, useState } from "react";
+import "../styles/plugin-manager.css";
 import { listen } from "@tauri-apps/api/event";
 import {
   friendlyMessage,
@@ -72,6 +75,7 @@ const readText = (settings: SettingsMap, key: string): string => {
 interface IntegrationsPageProps {
   onNotify: (message: string, tone?: "info" | "error") => void;
   onDataChanged: () => void;
+  focusPlugin?: string;
 }
 
 interface SuggestionRow {
@@ -79,8 +83,9 @@ interface SuggestionRow {
   segment: SegmentView;
 }
 
-export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPageProps) {
+export function IntegrationsPage({ onNotify, onDataChanged, focusPlugin }: IntegrationsPageProps) {
   const [cards, setCards] = useState<IntegrationView[] | null>(null);
+  const [catalogOpen, setCatalogOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -172,6 +177,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
       setBusy(`${card.id}-enabled`);
       try {
         const view = await ipc.integrationSetEnabled(card.id, next);
+      pluginsChanged();
         setCards((current) => current?.map((item) => (item.id === view.id ? view : item)) ?? current);
         onNotify(next ? `已启用 ${view.name}` : `已停用 ${view.name}`);
       } catch (reason) {
@@ -190,6 +196,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
     setBusy(`${card.id}-enabled`);
     try {
       const view = await ipc.integrationSetEnabled(card.id, true);
+      pluginsChanged();
       setCards((current) => current?.map((item) => (item.id === view.id ? view : item)) ?? current);
       onNotify(`已启用 ${view.name}`);
     } catch (reason) {
@@ -391,6 +398,18 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
     );
   }
 
+  const installed = cards.filter((card) => card.installed !== false && (!focusPlugin || card.id === focusPlugin));
+  const available = cards.filter((card) => card.installed === false);
+  const changeInstallation = async (card: IntegrationView, value: boolean) => {
+    setBusy(`${card.id}-installed`);
+    try {
+      const view = await ipc.integrationSetInstalled(card.id, value);
+      pluginsChanged();
+      setCards((current) => current?.map((item) => item.id === view.id ? view : item) ?? current);
+      onNotify(value ? `已添加 ${card.name}，启用后开始工作` : `已移除 ${card.name}，配置和本地记录已保留`);
+    } catch (e) { onNotify(friendlyMessage(toIpcError(e)), "error"); }
+    finally { setBusy(null); }
+  };
   const visibleOutbox = outboxFilter === "all" ? outbox : outbox.filter((row) => row.state === outboxFilter);
   const memosCard = cards.find((card) => card.id === "memos");
   const aiCard = cards.find((card) => card.id === "ai");
@@ -402,16 +421,22 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
   return (
     <div className="settings-page">
       <header className="page-head">
-        <h1>集成</h1>
+        <h1>{focusPlugin ? cards.find(p=>p.id===focusPlugin)?.name : "插件管理"}</h1>
         <p>核心功能无需任何集成 · 未启用的插件不产生任何联网请求</p>
       </header>
 
+      {!focusPlugin && <LocalPluginManager />}
       <section className="settings-group">
-        <h2>插件</h2>
-        {cards.length === 0 ? (
+        <div className="plugin-manager-actions"><h2>{focusPlugin ? "插件设置" : "已添加的插件"}</h2><button className="primary-btn primary-btn--sm" type="button" hidden={!!focusPlugin} onClick={() => setCatalogOpen((v) => !v)}>{catalogOpen ? "收起插件目录" : "＋ 添加插件"}</button></div>
+        {catalogOpen && <div className="plugin-catalog">
+          <h3>插件目录</h3><p>选择需要的功能，添加后单独配置与启用。移除会停止插件，保留配置便于重新添加。</p>
+          {available.length === 0 ? <p>目录中的插件均已添加。</p> : available.map((card) => <div key={card.id} className="setting-row"><div><strong>{card.name}</strong><p>{card.capabilities.map((cap) => CAPABILITY_LABEL[cap]).join(" · ")}</p></div><button type="button" className="ghost-btn" disabled={busy !== null} onClick={() => void changeInstallation(card, true)}>添加</button></div>)}
+          <p className="modal__hint">内置插件在此添加；本地扩展请使用上方“从本地安装”。MCP服务暂不支持。</p>
+        </div>}
+        {installed.length === 0 ? (
           <p className="panel__empty">还没有可用插件，所有数据都保存在本机</p>
         ) : (
-          cards.map((card) => (
+          installed.map((card) => (
             <div key={card.id} className="integration-card">
               <div className="integration-card__head">
                 <div className="integration-card__title">
@@ -423,6 +448,8 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
                     {card.enabled ? (card.configured ? "已配置" : "待配置") : "未启用"}
                   </span>
                 </div>
+                <div className="plugin-manager-actions">
+                <button type="button" className="ghost-btn" disabled={busy !== null} onClick={() => void changeInstallation(card, false)}>移除</button>
                 <label className="switch">
                   <input
                     type="checkbox"
@@ -433,11 +460,12 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
                   />
                   <span className="switch__track" aria-hidden="true" />
                 </label>
+                </div>
               </div>
 
               <p className="integration-card__desc">
                 {card.id === "memos"
-                  ? "记录关闭后自动发布为 Memos 日记，幂等重试，不打断打点。"
+                  ? "记录关闭后延迟发布最新内容，允许补写与撤销。侧边 Memos 共用此处的实例地址与 Access Token，无需再次登录。"
                   : card.id === "ai"
                     ? "用本地或 OpenAI 兼容服务整理标题与分类，建议需逐条确认。"
                     : card.id === "tomatodo"
@@ -523,7 +551,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
                   <div className="setting-row" style={{ borderTop: 0, paddingBottom: 0 }}>
                     <div className="setting-row__text">
                       <label>包含备注</label>
-                      <p>默认只发布标题与时间，开启后附带备注全文</p>
+                      <p>发布包含标题、分类、标签、专注状态、有效时长和暂停合计的完整记录；此开关决定是否附带备注全文。</p>
                     </div>
                     <label className="switch">
                       <input
@@ -788,7 +816,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
         )}
       </section>
 
-      {aiCard?.enabled && (
+      {(!focusPlugin || focusPlugin === "ai") && aiCard?.enabled && (
         <section className="settings-group">
           <h2>AI 整理建议</h2>
           <div className="setting-row setting-row--stack">
@@ -851,7 +879,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
         </section>
       )}
 
-      <section className="settings-group">
+      {!focusPlugin && <section className="settings-group">
         <h2>发布队列</h2>
         <div className="outbox-filters" role="group" aria-label="按状态筛选">
           {OUTBOX_FILTERS.map((filter) => (
@@ -907,20 +935,20 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
             ))}
           </div>
         )}
-      </section>
+      </section>}
 
-      <section className="settings-group">
+      {!focusPlugin && <section className="settings-group">
         <h2>隐私</h2>
         <div className="setting-row">
           <div className="setting-row__text">
             <label>联网范围</label>
             <p>
-              只在记录关闭后入队发送；请求域名受插件清单白名单限制；密钥只存系统钥匙串。AI 建议需手动触发，确认后才写回记录。
+              Memos 浏览与编辑按你的操作请求实例，自动发布受配置控制。请求仅发往配置的服务，跨站重定向被拒绝；令牌只存系统钥匙串。AI 建议需手动触发并确认后写回。
             </p>
           </div>
           <span className="badge">{cards.some((card) => card.enabled) ? "部分启用" : "未启用"}</span>
         </div>
-      </section>
+      </section>}
 
       {confirmEnable && (
         <div className="modal-backdrop" onClick={() => setConfirmEnable(null)}>
@@ -934,8 +962,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
               <strong>启用 {confirmEnable.name}？</strong>
             </div>
             <p className="modal__hint">
-              启用后，每次记录关闭时会向该服务发送：标题、起止时间、分类与标签
-              {confirmEnable.id === "ai" ? "（AI 助手仅在手动获取建议时联网）" : ""}。密钥存入系统钥匙串，本地记录始终保留完整副本。
+              {confirmEnable.id === "memos" ? "允许侧边 Memos 使用令牌读取和编辑远端记录。自动发布默认关闭，开启后发送标题、分类、标签、专注状态、时间与暂停汇总，备注由包含备注开关控制。" : "AI 仅在手动获取建议时发送隐私模式允许的字段；建议须确认后写入。"} 密钥存入系统钥匙串，本地时间记录保留在本机。
             </p>
             <div className="modal__foot">
               <div className="modal__actions">

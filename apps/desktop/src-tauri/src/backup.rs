@@ -17,7 +17,12 @@ pub struct BackupEntry {
     pub size_bytes: u64,
 }
 
-const FILE_FORMAT: &str = "dotlog-%Y%m%d-%H%M%S.db";
+const FILE_FORMAT: &str = "dotlog-%Y%m%d-%H%M%S-%f.db";
+fn parse_stamp(name: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(name, FILE_FORMAT)
+        .ok()
+        .or_else(|| NaiveDateTime::parse_from_str(name, "dotlog-%Y%m%d-%H%M%S.db").ok())
+}
 
 pub fn backup_dir(app_dir: &Path) -> PathBuf {
     app_dir.join("backups")
@@ -25,7 +30,7 @@ pub fn backup_dir(app_dir: &Path) -> PathBuf {
 
 /// 生成 `backups/dotlog-YYYYMMDD-HHmmss.db`。
 pub fn new_backup_path(app_dir: &Path) -> PathBuf {
-    let stamp = Local::now().format("%Y%m%d-%H%M%S");
+    let stamp = Local::now().format("%Y%m%d-%H%M%S-%f");
     backup_dir(app_dir).join(format!("dotlog-{stamp}.db"))
 }
 
@@ -39,12 +44,9 @@ pub fn list(dir: &Path) -> Vec<BackupEntry> {
         .filter_map(|entry| {
             let path = entry.path();
             let name = path.file_name()?.to_str()?;
-            let stamp = NaiveDateTime::parse_from_str(name, FILE_FORMAT).ok()?;
+            let stamp = parse_stamp(name)?;
             let size_bytes = entry.metadata().ok()?.len();
-            let created_at = stamp
-                .and_local_timezone(Local)
-                .single()?
-                .timestamp_millis();
+            let created_at = stamp.and_local_timezone(Local).single()?.timestamp_millis();
             Some((
                 stamp,
                 BackupEntry {
@@ -69,7 +71,7 @@ pub fn prune(dir: &Path, keep_daily: usize, keep_weekly: usize, keep_monthly: us
         .filter_map(|entry| {
             let path = entry.path();
             let name = path.file_name()?.to_str()?;
-            let stamp = NaiveDateTime::parse_from_str(name, FILE_FORMAT).ok()?;
+            let stamp = parse_stamp(name)?;
             Some((stamp, path))
         })
         .collect();
@@ -113,4 +115,18 @@ pub fn has_backup_today(dir: &Path) -> bool {
             .map(|stamp| stamp.with_timezone(&Local).date_naive() == today)
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn new_backup_names_are_parseable() {
+        let path = new_backup_path(Path::new("."));
+        assert!(parse_stamp(path.file_name().unwrap().to_str().unwrap()).is_some());
+    }
+    #[test]
+    fn original_backup_names_remain_readable() {
+        assert!(parse_stamp("dotlog-20261029-123456.db").is_some());
+    }
 }

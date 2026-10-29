@@ -21,10 +21,15 @@ const MIGRATIONS: &[Migration] = &[
         name: "seed_categories",
         sql: include_str!("../migrations/0002_seed_categories.sql"),
     },
+    Migration {
+        version: 3,
+        name: "record_sessions",
+        sql: include_str!("../migrations/0003_record_sessions.sql"),
+    },
 ];
 
 /// 当前程序支持的最高 schema 版本。
-pub const LATEST_VERSION: i64 = 2;
+pub const LATEST_VERSION: i64 = 3;
 
 const MIGRATION_TABLE_SQL: &str = "
 CREATE TABLE IF NOT EXISTS migration (

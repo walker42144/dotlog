@@ -9,6 +9,13 @@ export interface DayController {
 
 /** 今日日视图；`version` 变化时重新拉取（命令成功或撤销后）。 */
 export function useDay(version: number): DayController {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const refresh = () => setTick((v) => v + 1);
+    const id = window.setInterval(refresh, 15_000);
+    window.addEventListener("focus", refresh);
+    return () => { window.clearInterval(id); window.removeEventListener("focus", refresh); };
+  }, []);
   const [day, setDay] = useState<DayView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<IpcError | null>(null);
@@ -32,7 +39,7 @@ export function useDay(version: number): DayController {
     return () => {
       cancelled = true;
     };
-  }, [version]);
+  }, [version, tick]);
 
   return { day, loading, error };
 }

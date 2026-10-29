@@ -14,7 +14,6 @@ import {
   type TimerState
 } from "../lib/ipc";
 
-const UNDO_WINDOW_MS = 15_000;
 // 与 src-tauri/src/lib.rs 的 QUICK_PUNCH_EVENT / QUICK_PAUSE_EVENT 保持一致。
 const QUICK_PUNCH_EVENT = "dotlog://quick-punch";
 const QUICK_PAUSE_EVENT = "dotlog://quick-pause";
@@ -56,19 +55,15 @@ export interface TimerController {
 
 /** 本地秒表：以 active.startAt 为基准，每秒刷新一次。 */
 function useElapsed(state: TimerState | null): number {
-  const [now, setNow] = useState(0);
-  const startAt = state?.active?.startAt ?? null;
-
+  const [now, setNow] = useState(Date.now());
+  const anchor = useRef({ state, at: Date.now() });
+  if (anchor.current.state !== state) anchor.current = { state, at: Date.now() };
   useEffect(() => {
-    if (startAt === null) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [startAt]);
-
-  if (startAt === null) return 0;
-  if (now === 0) return state?.elapsedSeconds ?? 0;
-  return Math.max(0, Math.floor((now - startAt) / 1_000));
+    if (!state?.active) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [state?.active?.id]);
+  return Math.max(0, (state?.elapsedSeconds ?? 0) + (state?.active ? Math.floor(Math.max(0, now - anchor.current.at) / 1000) : 0));
 }
 
 /** 撤销倒计时；到 0 后自动失效。 */
@@ -104,6 +99,9 @@ export function useTimer(): TimerController {
   const [resolving, setResolving] = useState(false);
   // 事件回调需要读到最新状态，避免注册时的闭包旧值。
   const stateRef = useRef<TimerState | null>(null);
+  const running = useRef(false);
+  const undoWindowMs = useRef(15_000);
+  const promptOnPunch = useRef(true);
 
   useEffect(() => {
     stateRef.current = state;
@@ -125,6 +123,8 @@ export function useTimer(): TimerController {
   }, []);
 
   const run = useCallback(async (action: () => Promise<void>) => {
+    if (running.current) return;
+    running.current = true;
     setPending(true);
     try {
       await action();
@@ -132,11 +132,34 @@ export function useTimer(): TimerController {
     } catch (cause) {
       setError(toIpcError(cause));
     } finally {
+      running.current = false;
       setPending(false);
     }
   }, []);
 
   const refreshDay = useCallback(() => setDayVersion((value) => value + 1), []);
+  const refresh = useCallback(() => {
+    setLastClosed(null); setPendingNote(null); setUndoDeadline(null); setUndoableLabel(null);
+    void Promise.all([ipc.getState(), ipc.recoveryGet(), ipc.settingsGet("app"), ipc.getPendingNote()]).then(([next, info, settings, note]) => {
+      setState(next); stateRef.current = next; setRecovery(info.required ? info : null);
+      undoWindowMs.current = Number(settings["punch.undo_window_ms"] ?? 15_000);
+      promptOnPunch.current = settings["notify.on_punch"] !== false;
+      setPendingNote(note);
+      refreshDay();
+    }).catch((cause: unknown) => setError(toIpcError(cause)));
+  }, [refreshDay]);
+
+  useEffect(() => {
+    const onChanged = () => refresh();
+    window.addEventListener("dotlog:settings-changed", onChanged);
+    return () => window.removeEventListener("dotlog:settings-changed", onChanged);
+  }, [refresh]);
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    const check = () => { void ipc.recoveryGet().then((info) => setRecovery(info.required ? info : null)).catch((cause: unknown) => setError(toIpcError(cause))); };
+    const id = window.setInterval(check, 15_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // 启动恢复提示：后端在 setup 阶段已完成检测并缓存结果。
   useEffect(() => {
@@ -146,9 +169,7 @@ export function useTimer(): TimerController {
       .then((info) => {
         if (!cancelled) setRecovery(info.required ? info : null);
       })
-      .catch(() => {
-        // 恢复提示不是核心路径，读取失败时静默降级。
-      });
+      .catch((cause: unknown) => { if (!cancelled) setError(toIpcError(cause)); });
     return () => {
       cancelled = true;
     };
@@ -163,7 +184,7 @@ export function useTimer(): TimerController {
           setState(next);
           setRecovery(null);
           setLastClosed(null);
-          setPendingNote(null);
+          setPendingNote(await ipc.getPendingNote());
           setUndoDeadline(null);
           setUndoableLabel(null);
           refreshDay();
@@ -194,8 +215,8 @@ export function useTimer(): TimerController {
     async (command: () => Promise<Awaited<ReturnType<typeof ipc.punch>>>) => {
       const result = await command();
       setLastClosed(result.closedSegment);
-      setPendingNote(result.pendingNote ? result.closedSegment : null);
-      setUndoDeadline(result.undoToken ? Date.now() + UNDO_WINDOW_MS : null);
+      setPendingNote(result.pendingNote && promptOnPunch.current ? result.closedSegment : null);
+      setUndoDeadline(result.undoToken ? Date.now() + undoWindowMs.current : null);
       const seconds = result.closedSegment.durationSeconds;
       setUndoableLabel(
         result.undoToken
@@ -215,7 +236,11 @@ export function useTimer(): TimerController {
   }, [run, close]);
 
   const pause = useCallback(() => {
-    void run(() => close(() => ipc.pause()));
+    void run(async () => {
+      await close(() => ipc.pause());
+      setPendingNote(null);
+      setUndoableLabel("已暂停，暂停时间不计入记录");
+    });
   }, [run, close]);
 
   const finish = useCallback(() => {
@@ -229,12 +254,14 @@ export function useTimer(): TimerController {
     const unlisteners: UnlistenFn[] = [];
 
     const register = async () => {
-      const offPunch = await listen<string>(QUICK_PUNCH_EVENT, () => {
-        const current = stateRef.current;
-        if (current?.phase === "recording" && !current.paused) {
-          punch();
-        } else {
-          start();
+      const offPunch = await listen<Awaited<ReturnType<typeof ipc.punch>> | null>(QUICK_PUNCH_EVENT, (event) => {
+        refresh();
+        const result = event.payload;
+        if (result) {
+          setLastClosed(result.closedSegment);
+          setPendingNote(result.pendingNote && promptOnPunch.current ? result.closedSegment : null);
+          setUndoableLabel("已记录时间段");
+          setUndoDeadline(Date.now() + undoWindowMs.current);
         }
       });
       if (disposed) {
@@ -243,12 +270,7 @@ export function useTimer(): TimerController {
       }
       unlisteners.push(offPunch);
 
-      const offPause = await listen(QUICK_PAUSE_EVENT, () => {
-        const current = stateRef.current;
-        if (current?.phase === "recording" && !current.paused) {
-          pause();
-        }
-      });
+      const offPause = await listen(QUICK_PAUSE_EVENT, () => { refresh(); });
       if (disposed) {
         offPause();
         return;
@@ -264,7 +286,7 @@ export function useTimer(): TimerController {
       disposed = true;
       for (const off of unlisteners) off();
     };
-  }, [punch, pause, start]);
+  }, [refresh]);
 
   const undo = useCallback(() => {
     void run(async () => {
@@ -281,13 +303,15 @@ export function useTimer(): TimerController {
   // 编辑类操作统一入口：成功后开启 15 秒撤销窗口；错误抛给编辑器内联展示。
   const runEdit = useCallback(
     async <T,>(label: string, action: () => Promise<T>): Promise<T> => {
+      if (running.current) throw toIpcError(new Error("正在处理上一项操作"));
+      running.current = true;
       setPending(true);
       try {
         const result = await action();
         setLastClosed(null);
         setPendingNote(null);
         setUndoableLabel(label);
-        setUndoDeadline(Date.now() + UNDO_WINDOW_MS);
+        setUndoDeadline(Date.now() + undoWindowMs.current);
         setState(await ipc.getState());
         refreshDay();
         setError(null);
@@ -295,6 +319,7 @@ export function useTimer(): TimerController {
       } catch (cause) {
         throw toIpcError(cause);
       } finally {
+        running.current = false;
         setPending(false);
       }
     },
@@ -333,7 +358,7 @@ export function useTimer(): TimerController {
       if (!target) return;
       void run(async () => {
         await ipc.updateSegment(target.id, target.revision, { title, note });
-        setPendingNote(null);
+        setPendingNote(await ipc.getPendingNote());
         setUndoDeadline(null);
         setUndoableLabel(null);
         refreshDay();
@@ -342,7 +367,11 @@ export function useTimer(): TimerController {
     [pendingNote, run, refreshDay]
   );
 
-  const skipNote = useCallback(() => setPendingNote(null), []);
+  const skipNote = useCallback(() => {
+    const target=pendingNote;
+    if (!target) return;
+    void run(async()=>{await ipc.confirmSession(target.id);setPendingNote(await ipc.getPendingNote());});
+  }, [pendingNote,run]);
   const clearError = useCallback(() => setError(null), []);
 
   // 撤销窗口由 undoableLabel 标记（打点或编辑均可撤销），倒计时到 0 自动失效。
@@ -362,7 +391,7 @@ export function useTimer(): TimerController {
     recovery,
     resolving,
     resolveRecovery,
-    refresh: refreshDay,
+    refresh,
     start,
     punch,
     pause,

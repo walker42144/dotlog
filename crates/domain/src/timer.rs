@@ -49,8 +49,8 @@ pub fn punch(
     let closed = active.clone().closed(at)?;
     closed.validate()?;
 
-    let point =
-        TimePoint::new(ids.point_id.clone(), at, PointKind::Punch, source).with_segment(closed.id.clone());
+    let point = TimePoint::new(ids.point_id.clone(), at, PointKind::Punch, source)
+        .with_segment(closed.id.clone());
 
     let mut effects = vec![
         Effect::UpdateSegment(closed.clone()),
@@ -100,12 +100,22 @@ pub fn punch(
 }
 
 /// T6：暂停 = 关闭当前段并写 `pause` 事实，之后处于 Idle。
-pub fn pause(state: &TimerState, at: Instant, source: PointSource, ids: NewIds) -> DomainResult<Transition> {
+pub fn pause(
+    state: &TimerState,
+    at: Instant,
+    source: PointSource,
+    ids: NewIds,
+) -> DomainResult<Transition> {
     close_with(state, at, source, ids.point_id, PointKind::Pause, None)
 }
 
 /// T5：当天结束，关闭当前段并写 `finish` 事实；仍允许补记。
-pub fn finish(state: &TimerState, at: Instant, source: PointSource, ids: NewIds) -> DomainResult<Transition> {
+pub fn finish(
+    state: &TimerState,
+    at: Instant,
+    source: PointSource,
+    ids: NewIds,
+) -> DomainResult<Transition> {
     let active = require_active(state)?;
     let pending = Some(active.id.clone());
     close_with(state, at, source, ids.point_id, PointKind::Finish, pending)
@@ -160,13 +170,10 @@ pub fn undo(
                 .clone()
                 .ok_or(DomainError::UndoUnavailable)?;
             let reopened = closed.reopened();
-            let mut effects = vec![
-                Effect::MarkPointUndone {
-                    id: token.point_id.clone(),
-                    at_ms: at.utc_ms,
-                },
-                Effect::UpdateSegment(reopened.clone()),
-            ];
+            let mut effects = vec![Effect::MarkPointUndone {
+                id: token.point_id.clone(),
+                at_ms: at.utc_ms,
+            }];
 
             // 链式打点：软删除打点瞬间创建的下一段；若已填写内容则拒绝。
             if let Some(next_id) = &token.opened_segment_id {
@@ -180,7 +187,10 @@ pub fn undo(
                 });
             }
 
-            effects.push(Effect::InsertTimePoint(point.with_segment(reopened.id.clone())));
+            effects.push(Effect::UpdateSegment(reopened.clone()));
+            effects.push(Effect::InsertTimePoint(
+                point.with_segment(reopened.id.clone()),
+            ));
 
             Ok(Transition {
                 state: TimerState {
@@ -199,11 +209,9 @@ pub fn undo(
             // 恢复一个 active 段时，不能与其它正在进行的段冲突（唯一 active 不变量）。
             let restored_active = edit.restore.iter().find(|segment| segment.is_active());
             if let Some(restored) = restored_active {
-                if state
-                    .active
-                    .as_ref()
-                    .is_some_and(|current| current.id != restored.id)
-                {
+                if state.active.as_ref().is_some_and(|current| {
+                    current.id != restored.id && !edit.remove_ids.contains(&current.id)
+                }) {
                     return Err(DomainError::UndoUnavailable);
                 }
             }
@@ -212,16 +220,16 @@ pub fn undo(
                 id: token.point_id.clone(),
                 at_ms: at.utc_ms,
             }];
-            for segment in &edit.restore {
-                let mut restored = segment.clone();
-                restored.revision += 1;
-                effects.push(Effect::RestoreSegment(restored));
-            }
             for id in &edit.remove_ids {
                 effects.push(Effect::SoftDeleteSegment {
                     id: id.clone(),
                     at_ms: at.utc_ms,
                 });
+            }
+            for segment in &edit.restore {
+                let mut restored = segment.clone();
+                restored.revision += 1;
+                effects.push(Effect::RestoreSegment(restored));
             }
             effects.push(Effect::InsertTimePoint(point));
 
@@ -284,7 +292,8 @@ fn open_segment(
 ) -> DomainResult<Transition> {
     let segment = Segment::new_active(ids.segment_id, at);
     segment.validate()?;
-    let point = TimePoint::new(ids.point_id.clone(), at, kind, source).with_segment(segment.id.clone());
+    let point =
+        TimePoint::new(ids.point_id.clone(), at, kind, source).with_segment(segment.id.clone());
 
     Ok(Transition {
         state: TimerState {

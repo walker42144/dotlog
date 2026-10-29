@@ -8,7 +8,7 @@ use dotlog_ai::{
     AiError, AiPlugin, AiProvider, AiSuggestion, ClassifyInput, OpenAiCompatibleProvider,
     PrivacyMode,
 };
-use dotlog_application::dto::{BackfillInput, CategoryView, SegmentPatch, SegmentView};
+use dotlog_application::dto::{BackfillInput, SegmentPatch, SegmentView};
 use dotlog_application::{outbox_state, TimerStore};
 use dotlog_memos::endpoints as memos_endpoints;
 use dotlog_memos::{MemosPlugin, PublishHandler};
@@ -16,13 +16,13 @@ use dotlog_plugin_host::host::{segment_snapshot, HostLogger, PluginHost, TICK_IN
 use dotlog_plugin_host::net::{host_of, KeyringStore, UreqClient};
 use dotlog_plugin_sdk::{CloseReason, HttpClient, PluginManifest, SecretStore, SegmentClosedEvent};
 use dotlog_tomatodo::{
-    self as tomatodo, CompareResult, DotlogSegment, ImportResult, ScanResult, TomatodoPlugin,
-    compare, resolve_db_path, scan,
+    self as tomatodo, compare, resolve_db_path, scan, CompareResult, DotlogSegment, ImportResult,
+    ScanResult, TomatodoPlugin,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{app_dir, log, AppState, IpcError, IpcResult, store_error};
+use crate::{app_dir, log, store_error, AppState, IpcError, IpcResult};
 
 /// 同步状态事件（ipc-contract §4）。
 const INTEGRATION_EVENT: &str = "integration://status";
@@ -97,6 +97,7 @@ pub struct IntegrationView {
     pub name: String,
     pub version: String,
     pub enabled: bool,
+    pub installed: bool,
     pub configured: bool,
     pub capabilities: Vec<String>,
     pub last_error: Option<String>,
@@ -114,7 +115,10 @@ fn required_config_key(plugin_id: &str) -> &'static str {
     }
 }
 
-fn plugin_settings(state: &AppState, plugin_id: &str) -> serde_json::Map<String, serde_json::Value> {
+fn plugin_settings(
+    state: &AppState,
+    plugin_id: &str,
+) -> serde_json::Map<String, serde_json::Value> {
     state
         .timer
         .settings(Some(&format!("plugin:{plugin_id}")))
@@ -153,19 +157,25 @@ fn latest_for_provider(
 
 fn integration_view(state: &AppState, manifest: &PluginManifest) -> IntegrationView {
     let settings = plugin_settings(state, &manifest.id);
-    let configured = settings
-        .get(required_config_key(&manifest.id))
-        .and_then(|value| value.as_str())
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
+    let configured = required_config_key(&manifest.id).is_empty()
+        || settings
+            .get(required_config_key(&manifest.id))
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
     let (last_error, last_sync_at) = provider_status(state, &manifest.id);
     IntegrationView {
         id: manifest.id.clone(),
         name: manifest.name.clone(),
         version: manifest.version.clone(),
         enabled: state.host.plugin_enabled(&manifest.id),
+        installed: state.host.plugin_installed(&manifest.id),
         configured,
-        capabilities: manifest.capabilities.iter().map(|cap| cap.as_str().to_string()).collect(),
+        capabilities: manifest
+            .capabilities
+            .iter()
+            .map(|cap| cap.as_str().to_string())
+            .collect(),
         last_error,
         last_sync_at,
     }
@@ -191,8 +201,50 @@ pub fn integration_set_enabled(
     enabled: bool,
 ) -> IpcResult<IntegrationView> {
     let manifest = manifest_of(&state, &id)?;
-    state.host.set_enabled(&id, enabled, now_ms());
+    let _lifecycle = state
+        .host
+        .lifecycle
+        .lock()
+        .map_err(|_| store_error("E_UNKNOWN", "插件状态锁不可用".into()))?;
+    if enabled && !state.host.plugin_installed(&id) {
+        return Err(store_error("E_PLUGIN_DISABLED", "请先添加插件".into()));
+    }
+    state
+        .timer
+        .settings_patch(
+            &format!("plugin:{id}"),
+            vec![("enabled".into(), serde_json::json!(enabled))],
+        )
+        .map_err(IpcError::from)?;
     log::write(&app_dir(), "INFO", &format!("集成 {id} 启停：{enabled}"));
+    let view = integration_view(&state, &manifest);
+    let _ = app.emit(INTEGRATION_EVENT, &view);
+    Ok(view)
+}
+
+#[tauri::command]
+pub fn integration_set_installed(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    installed: bool,
+) -> IpcResult<IntegrationView> {
+    let manifest = manifest_of(&state, &id)?;
+    let _lifecycle = state
+        .host
+        .lifecycle
+        .lock()
+        .map_err(|_| store_error("E_UNKNOWN", "插件状态锁不可用".into()))?;
+    state
+        .timer
+        .settings_patch(
+            &format!("plugin:{id}"),
+            vec![
+                ("installed".into(), serde_json::json!(installed)),
+                ("enabled".into(), serde_json::json!(false)),
+            ],
+        )
+        .map_err(IpcError::from)?;
     let view = integration_view(&state, &manifest);
     let _ = app.emit(INTEGRATION_EVENT, &view);
     Ok(view)
@@ -208,19 +260,29 @@ pub fn integration_config_set(
     let manifest = manifest_of(&state, &id)?;
     // 实例地址做基本格式校验（§7.1）；完整可达性由 integration_test 验证。
     for (key, value) in &config {
-        if (key == "instanceUrl" || key == "baseUrl")
-            && value
+        if key == "instanceUrl" || key == "baseUrl" {
+            let text = value
                 .as_str()
-                .map(|url| {
-                    let url = url.trim();
-                    !url.is_empty() && !url.starts_with("https://") && !url.starts_with("http://")
-                })
-                .unwrap_or(false)
-        {
-            return Err(store_error(
-                "E_SETTING_INVALID",
-                format!("{key} 需要以 http(s):// 开头"),
-            ));
+                .ok_or_else(|| store_error("E_SETTING_INVALID", "地址必须是文本".into()))?;
+            if text.trim().is_empty() {
+                continue;
+            }
+            let parsed = text
+                .trim()
+                .parse::<tauri::Url>()
+                .map_err(|_| store_error("E_SETTING_INVALID", "地址格式不正确".into()))?;
+            if !["http", "https"].contains(&parsed.scheme())
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                return Err(store_error(
+                    "E_SETTING_INVALID",
+                    "地址须为 HTTP/HTTPS，不能包含凭据、查询参数或锚点".into(),
+                ));
+            }
         }
     }
     let scope = format!("plugin:{id}");
@@ -290,7 +352,12 @@ fn test_memos(
         .get("instanceUrl")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| store_error("E_INTEGRATION_NOT_CONFIGURED", "请先填写实例地址".to_string()))?;
+        .ok_or_else(|| {
+            store_error(
+                "E_INTEGRATION_NOT_CONFIGURED",
+                "请先填写实例地址".to_string(),
+            )
+        })?;
     let token = KeyringStore::for_plugin("memos")
         .get_secret("token")
         .map_err(|error| store_error("E_UNKNOWN", error.to_string()))?;
@@ -298,17 +365,35 @@ fn test_memos(
         allowed_hosts: host_of(base_url).into_iter().collect(),
         timeout_ms: 10_000,
     };
-    match memos_endpoints::probe(&client, base_url, token.as_deref()) {
-        Ok(outcome) => {
-            let _ = state.timer.settings_patch(
-                "plugin:memos",
-                vec![("apiVersion".into(), serde_json::json!(outcome.api_version()))],
-            );
-            log::write(&app_dir(), "INFO", &format!("Memos 连接测试成功：{base_url}"));
-            Ok(outcome.describe().to_string())
-        }
-        Err(message) => Err(store_error("E_NETWORK", message)),
-    }
+    let token = token.filter(|t| !t.trim().is_empty()).ok_or_else(|| {
+        store_error(
+            "E_INTEGRATION_NOT_CONFIGURED",
+            "请先保存 Access Token".into(),
+        )
+    })?;
+    let base = memos_endpoints::normalize_base(base_url)
+        .ok_or_else(|| store_error("E_SETTING_INVALID", "实例地址无效".into()))?;
+    let browser = dotlog_memos::browser::BrowserClient {
+        http: &client,
+        base: &base,
+        token: &token,
+    };
+    let (version, _) = browser
+        .authenticate(
+            settings
+                .get("apiVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or("v1"),
+        )
+        .map_err(|e| store_error("E_MEMOS", e))?;
+    state
+        .timer
+        .settings_patch(
+            "plugin:memos",
+            vec![("apiVersion".into(), serde_json::json!(version))],
+        )
+        .map_err(IpcError::from)?;
+    Ok("Access Token 验证成功，侧边 Memos 可直接使用".into())
 }
 
 /// AI 连接测试：请求 OpenAI 兼容的 `GET /models`。
@@ -317,7 +402,12 @@ fn test_ai(settings: &serde_json::Map<String, serde_json::Value>) -> IpcResult<S
         .get("baseUrl")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| store_error("E_INTEGRATION_NOT_CONFIGURED", "请先填写服务地址".to_string()))?;
+        .ok_or_else(|| {
+            store_error(
+                "E_INTEGRATION_NOT_CONFIGURED",
+                "请先填写服务地址".to_string(),
+            )
+        })?;
     let api_key = KeyringStore::for_plugin("ai")
         .get_secret("token")
         .map_err(|error| store_error("E_UNKNOWN", error.to_string()))?
@@ -442,17 +532,26 @@ pub fn ai_suggest(
     date: Option<String>,
 ) -> IpcResult<Vec<AiSuggestion>> {
     if !app_state.host.plugin_enabled(dotlog_ai::PLUGIN_ID) {
-        return Err(store_error("E_PLUGIN_DISABLED", "AI 助手未启用".to_string()));
+        return Err(store_error(
+            "E_PLUGIN_DISABLED",
+            "AI 助手未启用".to_string(),
+        ));
     }
     let settings = plugin_settings(&app_state, dotlog_ai::PLUGIN_ID);
     let privacy = PrivacyMode::from_setting(settings.get("privacyMode").and_then(|v| v.as_str()));
     if privacy == PrivacyMode::Off {
-        return Err(store_error("E_PLUGIN_DISABLED", "AI 联网已关闭（隐私模式 off）".to_string()));
+        return Err(store_error(
+            "E_PLUGIN_DISABLED",
+            "AI 联网已关闭（隐私模式 off）".to_string(),
+        ));
     }
     let provider = ai_provider(&settings)?;
 
     // 待整理段：指定日（默认今天）的已关闭且未忽略段（§8.3 title_only 范围）。
-    let day = app_state.timer.day(date.as_deref()).map_err(IpcError::from)?;
+    let day = app_state
+        .timer
+        .day(date.as_deref())
+        .map_err(IpcError::from)?;
     let categories_rows = app_state.store.categories().map_err(IpcError::from)?;
     let segments = app_state
         .store
@@ -531,7 +630,16 @@ pub fn ai_apply(
     app_state: tauri::State<'_, AppState>,
     input: AiApplyInput,
 ) -> IpcResult<SegmentView> {
-    // 先改标题/分类（乐观锁用传入 revision），标签随后追加（每次会推进 revision）。
+    if !app_state.host.plugin_enabled("ai") {
+        return Err(store_error("E_PLUGIN_DISABLED", "AI 插件未启用".into()));
+    }
+    let current = app_state
+        .store
+        .find_segment(&input.segment_id)
+        .map_err(IpcError::from)?
+        .ok_or_else(|| store_error("E_SEGMENT_NOT_FOUND", "记录不存在".into()))?;
+    let mut combined_tags = current.tags;
+    combined_tags.extend(input.tags.iter().cloned());
     let patch = SegmentPatch {
         title: input
             .title
@@ -549,51 +657,14 @@ pub fn ai_apply(
                 Some(id.to_string())
             }
         }),
+        tags: Some(combined_tags),
         is_focus: None,
         is_ignored: None,
     };
-    let view = if patch.title.is_some() || patch.category_id.is_some() {
-        app_state
-            .timer
-            .update_segment(&input.segment_id, input.revision, patch)
-            .map_err(IpcError::from)?
-    } else {
-        let segment = app_state
-            .store
-            .find_segment(&input.segment_id)
-            .map_err(IpcError::from)?
-            .ok_or_else(|| store_error("E_SEGMENT_NOT_FOUND", "这条记录不存在".to_string()))?;
-        let now = now_ms();
-        let mut view = SegmentView::from_segment(&segment, now);
-        if let Some(category) = category_view(&app_state, segment.category_id.as_deref())? {
-            view = view.with_category(Some(category));
-        }
-        view
-    };
-
-    let now = now_ms();
-    for tag in &input.tags {
-        let name = tag.trim().trim_start_matches('#').trim();
-        if name.is_empty() {
-            continue;
-        }
-        app_state
-            .store
-            .segment_attach_tag(&input.segment_id, name, now)
-            .map_err(IpcError::from)?;
-    }
-    Ok(view)
-}
-
-fn category_view(
-    app_state: &AppState,
-    category_id: Option<&str>,
-) -> IpcResult<Option<CategoryView>> {
-    let Some(id) = category_id else {
-        return Ok(None);
-    };
-    let categories = app_state.timer.categories().map_err(IpcError::from)?;
-    Ok(categories.into_iter().find(|category| category.id == id))
+    app_state
+        .timer
+        .update_segment(&input.segment_id, input.revision, patch)
+        .map_err(IpcError::from)
 }
 
 // ---------- 番茄Todo 集成命令 ----------
@@ -601,6 +672,12 @@ fn category_view(
 /// 读取番茄Todo 数据库并返回预览（不写入）。
 #[tauri::command]
 pub fn tomatodo_scan(state: tauri::State<'_, AppState>) -> IpcResult<ScanResult> {
+    if !state.host.plugin_enabled("tomatodo") {
+        return Err(store_error(
+            "E_PLUGIN_DISABLED",
+            "请先添加并启用番茄Todo插件".into(),
+        ));
+    }
     let settings = plugin_settings(&state, tomatodo::PLUGIN_ID);
     let db_path = settings
         .get(tomatodo::SETTING_DB_PATH)
@@ -612,31 +689,38 @@ pub fn tomatodo_scan(state: tauri::State<'_, AppState>) -> IpcResult<ScanResult>
 /// 增量导入番茄Todo 专注记录为 DotLog 段。
 #[tauri::command]
 pub fn tomatodo_import(state: tauri::State<'_, AppState>) -> IpcResult<ImportResult> {
+    if !state.host.plugin_enabled("tomatodo") {
+        return Err(store_error(
+            "E_PLUGIN_DISABLED",
+            "请先添加并启用番茄Todo插件".into(),
+        ));
+    }
     let settings = plugin_settings(&state, tomatodo::PLUGIN_ID);
     let db_path = settings
         .get(tomatodo::SETTING_DB_PATH)
         .and_then(|value| value.as_str());
     let path = resolve_db_path(db_path);
 
-    let last_imported_id = settings
-        .get(tomatodo::SETTING_LAST_IMPORTED_ID)
-        .and_then(|value| value.as_i64())
-        .unwrap_or(0);
-
     let db = tomatodo::TomatodoDb::from_file(&path)
         .map_err(|message| store_error("E_TOMATODO_SCAN", message))?;
-
     let mut result = ImportResult::default();
-    let mut max_imported_id = last_imported_id;
-
+    let source_key = path.to_string_lossy();
     for record in &db.pc_record {
         if !record.is_completed() {
             result.skipped_incomplete += 1;
             continue;
         }
-        if record.id <= last_imported_id {
-            result.skipped_existing += 1;
-            continue;
+        let key = format!("tomatodo.imported:{source_key}:{}", record.id);
+        if let Some(id) = state.store.runtime_state(&key).map_err(IpcError::from)? {
+            if state
+                .store
+                .find_segment(&id)
+                .map_err(IpcError::from)?
+                .is_some()
+            {
+                result.skipped_existing += 1;
+                continue;
+            }
         }
         let input = BackfillInput {
             start_at: record.start_date,
@@ -648,11 +732,12 @@ pub fn tomatodo_import(state: tauri::State<'_, AppState>) -> IpcResult<ImportRes
             is_ignored: false,
         };
         match state.timer.backfill_segment(input) {
-            Ok(_) => {
+            Ok(view) => {
+                state
+                    .store
+                    .set_runtime_state(&key, &view.id, now_ms())
+                    .map_err(IpcError::from)?;
                 result.imported += 1;
-                if record.id > max_imported_id {
-                    max_imported_id = record.id;
-                }
             }
             Err(error) => {
                 // 时间重叠 → 冲突；其他 → 错误。
@@ -660,21 +745,12 @@ pub fn tomatodo_import(state: tauri::State<'_, AppState>) -> IpcResult<ImportRes
                 if message.contains("重叠") || message.contains("overlap") {
                     result.conflicts += 1;
                 } else {
-                    result.errors.push(format!("记录 #{}：{message}", record.id));
+                    result
+                        .errors
+                        .push(format!("记录 #{}：{message}", record.id));
                 }
             }
         }
-    }
-
-    // 更新游标。
-    if max_imported_id > last_imported_id {
-        let _ = state.timer.settings_patch(
-            &format!("plugin:{}", tomatodo::PLUGIN_ID),
-            vec![(
-                tomatodo::SETTING_LAST_IMPORTED_ID.into(),
-                serde_json::json!(max_imported_id),
-            )],
-        );
     }
 
     Ok(result)
@@ -683,6 +759,12 @@ pub fn tomatodo_import(state: tauri::State<'_, AppState>) -> IpcResult<ImportRes
 /// 对比番茄Todo 记录与 DotLog 段（按时间重叠）。
 #[tauri::command]
 pub fn tomatodo_compare(state: tauri::State<'_, AppState>) -> IpcResult<CompareResult> {
+    if !state.host.plugin_enabled("tomatodo") {
+        return Err(store_error(
+            "E_PLUGIN_DISABLED",
+            "请先添加并启用番茄Todo插件".into(),
+        ));
+    }
     compare_internal(state.inner())
 }
 
@@ -746,13 +828,19 @@ pub struct TomatodoAnalysis {
 #[tauri::command]
 pub fn tomatodo_analyze(state: tauri::State<'_, AppState>) -> IpcResult<Vec<TomatodoAnalysis>> {
     if !state.host.plugin_enabled(dotlog_ai::PLUGIN_ID) {
-        return Err(store_error("E_PLUGIN_DISABLED", "AI 助手未启用".to_string()));
+        return Err(store_error(
+            "E_PLUGIN_DISABLED",
+            "AI 助手未启用".to_string(),
+        ));
     }
     let ai_settings = plugin_settings(&state, dotlog_ai::PLUGIN_ID);
     let privacy =
         PrivacyMode::from_setting(ai_settings.get("privacyMode").and_then(|v| v.as_str()));
     if privacy == PrivacyMode::Off {
-        return Err(store_error("E_PLUGIN_DISABLED", "AI 联网已关闭（隐私模式 off）".to_string()));
+        return Err(store_error(
+            "E_PLUGIN_DISABLED",
+            "AI 联网已关闭（隐私模式 off）".to_string(),
+        ));
     }
 
     // 先做对比。
@@ -771,7 +859,13 @@ pub fn tomatodo_analyze(state: tauri::State<'_, AppState>) -> IpcResult<Vec<Toma
             let dotlog_summary = pair
                 .dotlog_segments
                 .iter()
-                .map(|seg| format!("{}（{}）", seg.title, seg.category_name.as_deref().unwrap_or("无分类")))
+                .map(|seg| {
+                    format!(
+                        "{}（{}）",
+                        seg.title,
+                        seg.category_name.as_deref().unwrap_or("无分类")
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("；");
             Some((idx, tomatodo_name, dotlog_summary))
@@ -792,8 +886,10 @@ pub fn tomatodo_analyze(state: tauri::State<'_, AppState>) -> IpcResult<Vec<Toma
     // 构建分析 prompt。
     let pairs_payload: Vec<serde_json::Value> = analyzable
         .iter()
-        .map(|(_, subject, summary)| {
+        .enumerate()
+        .map(|(pair_id, (_, subject, summary))| {
             serde_json::json!({
+                "pairId": pair_id,
                 "tomatodoSubject": subject,
                 "dotlogSummary": summary,
             })
@@ -802,7 +898,7 @@ pub fn tomatodo_analyze(state: tauri::State<'_, AppState>) -> IpcResult<Vec<Toma
 
     let system_prompt = "你是时间记录分析助手。用户同时使用番茄Todo（只记录科目+时长）和 DotLog（记录具体活动）。\
 请分析每对数据：番茄Todo 记录的科目与 DotLog 记录的具体活动是否匹配？给出简短建议。\
-只返回 JSON 数组，不要解释。元素格式：{\"tomatodoSubject\":\"...\",\"suggestion\":\"...\",\"reason\":\"一句话\"}。\
+只返回 JSON 数组，不要解释。元素格式：{\"pairId\":0,\"tomatodoSubject\":\"...\",\"suggestion\":\"...\",\"reason\":\"一句话\"}。\
 建议类型：1) 匹配良好；2) 科目与活动不符，建议修正；3) DotLog 记录过细，建议合并；4) DotLog 缺少细节，建议补充。";
 
     let body = serde_json::json!({
@@ -841,8 +937,27 @@ pub fn tomatodo_analyze(state: tauri::State<'_, AppState>) -> IpcResult<Vec<Toma
     // 再剥掉可能的 markdown 代码块包裹，最后解析为 JSON 数组。
     let body = response.text();
     let content = parse_chat_content(&body);
-    let parsed: Vec<serde_json::Value> =
-        serde_json::from_str(&content).unwrap_or_else(|_| Vec::new());
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&content)
+        .map_err(|e| store_error("E_AI_PARSE", format!("分析结果格式错误：{e}")))?;
+    if parsed.len() != analyzable.len() {
+        return Err(store_error(
+            "E_AI_PARSE",
+            "分析结果数量不完整，请重试".into(),
+        ));
+    }
+    let mut parsed = parsed;
+    parsed.sort_by_key(|v| v.get("pairId").and_then(|x| x.as_u64()).unwrap_or(u64::MAX));
+    for (id, value) in parsed.iter().enumerate() {
+        if value.get("pairId").and_then(|v| v.as_u64()) != Some(id as u64)
+            || value.get("suggestion").and_then(|v| v.as_str()).is_none()
+            || value.get("reason").and_then(|v| v.as_str()).is_none()
+        {
+            return Err(store_error(
+                "E_AI_PARSE",
+                "分析结果缺少对应编号或字段，请重试".into(),
+            ));
+        }
+    }
 
     let results: Vec<TomatodoAnalysis> = parsed
         .into_iter()
@@ -895,4 +1010,102 @@ fn parse_chat_content(body: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+// The UI never receives the access token: all Memos requests originate in Rust.
+fn with_memos<T>(
+    state: &AppState,
+    f: impl FnOnce(&dotlog_memos::browser::BrowserClient<'_>, &str) -> Result<T, String>,
+) -> IpcResult<T> {
+    let _lifecycle = state
+        .host
+        .lifecycle
+        .lock()
+        .map_err(|_| store_error("E_UNKNOWN", "插件状态不可用".into()))?;
+    if !state.host.plugin_enabled("memos") {
+        return Err(store_error(
+            "E_PLUGIN_DISABLED",
+            "请在插件目录中添加并启用 Memos".into(),
+        ));
+    }
+    let settings = plugin_settings(state, "memos");
+    let base = settings
+        .get("instanceUrl")
+        .and_then(|v| v.as_str())
+        .and_then(memos_endpoints::normalize_base)
+        .ok_or_else(|| {
+            store_error(
+                "E_INTEGRATION_NOT_CONFIGURED",
+                "请配置 Memos 实例地址".into(),
+            )
+        })?;
+    let token = KeyringStore::for_plugin("memos")
+        .get_secret("token")
+        .map_err(|e| store_error("E_UNKNOWN", e.to_string()))?
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            store_error(
+                "E_INTEGRATION_NOT_CONFIGURED",
+                "请在 Memos 插件中保存 Access Token".into(),
+            )
+        })?;
+    let client = UreqClient {
+        allowed_hosts: host_of(&base).into_iter().collect(),
+        timeout_ms: 10_000,
+    };
+    let browser = dotlog_memos::browser::BrowserClient {
+        http: &client,
+        base: &base,
+        token: &token,
+    };
+    f(
+        &browser,
+        settings
+            .get("apiVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("v1"),
+    )
+    .map_err(|e| store_error("E_MEMOS", e))
+}
+
+#[tauri::command]
+pub async fn memos_browse(
+    app: AppHandle,
+    page_token: Option<String>,
+) -> IpcResult<dotlog_memos::browser::MemoPage> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        with_memos(&state, |client, version| {
+            client.browse(version, page_token.as_deref())
+        })
+    })
+    .await
+    .map_err(|e| store_error("E_UNKNOWN", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn memos_save(
+    app: AppHandle,
+    name: Option<String>,
+    content: String,
+    visibility: String,
+) -> IpcResult<dotlog_memos::browser::Memo> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        with_memos(&state, |client, version| {
+            client.save(version, name.as_deref(), &content, &visibility)
+        })
+    })
+    .await
+    .map_err(|e| store_error("E_UNKNOWN", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn memos_delete(app: AppHandle, name: String) -> IpcResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        with_memos(&state, |client, version| client.delete(version, &name))
+    })
+    .await
+    .map_err(|e| store_error("E_UNKNOWN", e.to_string()))?
 }

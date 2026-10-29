@@ -3,7 +3,9 @@
 use std::sync::Mutex;
 
 use dotlog_memos::endpoints::{self, ProbeOutcome};
-use dotlog_memos::{DEFAULT_TEMPLATE, EVENT_TYPE, MemosPlugin, PLUGIN_ID, PublishHandler, render_content};
+use dotlog_memos::{
+    render_content, MemosPlugin, PublishHandler, DEFAULT_TEMPLATE, EVENT_TYPE, PLUGIN_ID,
+};
 use dotlog_plugin_sdk::{
     CloseReason, HttpClient, HttpRequest, HttpResponse, IntegrationLinks, LinkRecord, OutboxEnv,
     OutboxHandler, OutboxInput, OutboxOutcome, OutboxSink, Plugin, PluginCtx, PluginError,
@@ -41,7 +43,11 @@ struct MockHttp {
 impl MockHttp {
     fn with_rule(method: &'static str, url_suffix: &'static str, response: FakeResponse) -> Self {
         let http = Self::default();
-        http.rules.lock().unwrap().push(Rule { method, url_suffix, response });
+        http.rules.lock().unwrap().push(Rule {
+            method,
+            url_suffix,
+            response,
+        });
         http
     }
 }
@@ -66,15 +72,25 @@ impl HttpClient for MockHttp {
             .iter()
             .find(|rule| request.method == rule.method && request.url.ends_with(rule.url_suffix));
         match matched {
-            Some(Rule { response: FakeResponse::Http(status, body), .. }) => Ok(HttpResponse {
+            Some(Rule {
+                response: FakeResponse::Http(status, body),
+                ..
+            }) => Ok(HttpResponse {
                 status: *status,
                 body: body.as_bytes().to_vec(),
             }),
-            Some(Rule { response: FakeResponse::Network, .. }) => {
-                Err(PluginError::Network("connection refused".into()))
-            }
-            Some(Rule { response: FakeResponse::Timeout, .. }) => Err(PluginError::Timeout),
-            None => Ok(HttpResponse { status: 404, body: Vec::new() }),
+            Some(Rule {
+                response: FakeResponse::Network,
+                ..
+            }) => Err(PluginError::Network("connection refused".into())),
+            Some(Rule {
+                response: FakeResponse::Timeout,
+                ..
+            }) => Err(PluginError::Timeout),
+            None => Ok(HttpResponse {
+                status: 404,
+                body: Vec::new(),
+            }),
         }
     }
 }
@@ -241,6 +257,7 @@ fn handler_env<'a>(
     links: &'a MockLinks,
 ) -> OutboxEnv<'a> {
     OutboxEnv {
+        segments: None,
         http: Some(http),
         secrets: Some(secrets),
         settings,
@@ -263,13 +280,18 @@ fn assert_done(outcome: OutboxOutcome, expected: Option<&str>) {
 
 fn assert_fail_contains(outcome: OutboxOutcome, needle: &str) {
     match outcome {
-        OutboxOutcome::Fail { error } => assert!(error.contains(needle), "错误信息缺 `{needle}`：{error}"),
+        OutboxOutcome::Fail { error } => {
+            assert!(error.contains(needle), "错误信息缺 `{needle}`：{error}")
+        }
         other => panic!("期望 Fail（含 {needle}），实际 {other:?}"),
     }
 }
 
 fn assert_retry(outcome: OutboxOutcome) {
-    assert!(matches!(outcome, OutboxOutcome::RetryLater { .. }), "期望 RetryLater，实际 {outcome:?}");
+    assert!(
+        matches!(outcome, OutboxOutcome::RetryLater { .. }),
+        "期望 RetryLater，实际 {outcome:?}"
+    );
 }
 
 // ---------- 探测（§7.2） ----------
@@ -281,12 +303,18 @@ fn probe_uses_status_endpoint() {
     assert_eq!(outcome, Ok(ProbeOutcome::Ok { api_version: "v1" }));
     let captured = http.captured.lock().unwrap();
     // 探测按候选顺序尝试，status 在第三位命中
-    assert!(captured.iter().any(|c| c.url == "https://memos.example.com/api/v1/status"));
+    assert!(captured
+        .iter()
+        .any(|c| c.url == "https://memos.example.com/api/v1/status"));
 }
 
 #[test]
 fn probe_falls_back_to_profile() {
-    let http = MockHttp::with_rule("GET", "/api/v1/workspace/profile", FakeResponse::Http(200, "{}"));
+    let http = MockHttp::with_rule(
+        "GET",
+        "/api/v1/workspace/profile",
+        FakeResponse::Http(200, "{}"),
+    );
     let outcome = endpoints::probe(&http, "https://memos.example.com", None);
     assert_eq!(outcome, Ok(ProbeOutcome::Ok { api_version: "v1" }));
 }
@@ -328,7 +356,9 @@ fn on_close_enqueues_publish_event() {
     assert_eq!(events[0].dedupe_key, "memos:0192-seg:publish");
     assert_eq!(events[0].event_type, EVENT_TYPE);
     let content = events[0].payload["content"].as_str().unwrap();
-    assert!(content.contains("**09:00–10:12（1h12m）** 高数 880 题 21–35"));
+    assert!(content.contains("# 打点记录 · 高数 880 题 21–35"));
+    assert!(content.contains("2026-10-29 09:00:00"));
+    assert!(content.contains("1 小时 12 分"));
     assert!(content.contains("#学习 #高数"));
     // 默认只发标题，不发备注（§7.4）。
     assert!(!content.contains("卡了很久"));
@@ -402,7 +432,10 @@ fn publish_success_maps_proto_visibility() {
     let secrets = MockSecrets { token: Some("tok") };
     let settings = settings(vec![("visibility", json!("public"))]);
     let links = MockLinks::default();
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
 
     assert_done(outcome, Some("memos/123"));
     let captured = http.captured.lock().unwrap();
@@ -422,7 +455,10 @@ fn publish_is_idempotent_when_link_published() {
     let links = MockLinks {
         published: Some(("seg-1", "memos/99")),
     };
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
 
     assert_done(outcome, Some("memos/99"));
     assert!(http.captured.lock().unwrap().is_empty());
@@ -430,11 +466,18 @@ fn publish_is_idempotent_when_link_published() {
 
 #[test]
 fn publish_4xx_fails_without_retry() {
-    let http = MockHttp::with_rule("POST", "/api/v1/memos", FakeResponse::Http(401, r#"{"message":"unauthorized"}"#));
+    let http = MockHttp::with_rule(
+        "POST",
+        "/api/v1/memos",
+        FakeResponse::Http(401, r#"{"message":"unauthorized"}"#),
+    );
     let secrets = MockSecrets { token: Some("tok") };
     let settings = settings(Vec::new());
     let links = MockLinks::default();
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
     assert_fail_contains(outcome, "401");
 }
 
@@ -445,15 +488,24 @@ fn publish_5xx_and_network_errors_retry() {
     let links = MockLinks::default();
 
     let http = MockHttp::with_rule("POST", "/api/v1/memos", FakeResponse::Http(502, ""));
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
     assert_retry(outcome);
 
     let http = MockHttp::with_rule("POST", "/api/v1/memos", FakeResponse::Network);
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
     assert_retry(outcome);
 
     let http = MockHttp::with_rule("POST", "/api/v1/memos", FakeResponse::Timeout);
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
     assert_retry(outcome);
 }
 
@@ -463,7 +515,10 @@ fn publish_missing_token_fails() {
     let secrets = MockSecrets { token: None };
     let settings = settings(Vec::new());
     let links = MockLinks::default();
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
     assert_fail_contains(outcome, "令牌");
 }
 
@@ -471,9 +526,14 @@ fn publish_missing_token_fails() {
 fn publish_missing_instance_fails() {
     let http = MockHttp::default();
     let secrets = MockSecrets { token: Some("tok") };
-    let settings = MockSettings { entries: Vec::new() };
+    let settings = MockSettings {
+        entries: Vec::new(),
+    };
     let links = MockLinks::default();
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
     assert_fail_contains(outcome, "instanceUrl");
 }
 
@@ -483,6 +543,129 @@ fn publish_unsupported_api_version_fails() {
     let secrets = MockSecrets { token: Some("tok") };
     let settings = settings(vec![("apiVersion", json!("v9"))]);
     let links = MockLinks::default();
-    let outcome = PublishHandler.handle(&publish_payload(), &handler_env(&http, &secrets, &settings, &links));
+    let outcome = PublishHandler.handle(
+        &publish_payload(),
+        &handler_env(&http, &secrets, &settings, &links),
+    );
     assert_fail_contains(outcome, "不支持的 Memos API 版本");
+}
+
+#[test]
+fn detailed_record_includes_metadata_and_excludes_pause_from_active_time() {
+    let mut s = snapshot();
+    s.end_at_ms = s.start_at_ms + 70 * 60 * 1000;
+    s.duration_seconds = 50 * 60;
+    s.category_name = Some("学习".into());
+    s.note = "完成例题\n\n下次复习错题".into();
+    let content = render_content(&s, DEFAULT_TEMPLATE, true);
+    for expected in [
+        "有效时长 | 50 分",
+        "暂停合计 | 20 分",
+        "跨度（含暂停） | 1 小时 10 分",
+        "分类 | 学习",
+        "专注 | 是",
+        "#学习 #高数",
+        "完成例题\n\n下次复习错题",
+    ] {
+        assert!(content.contains(expected), "{expected}: {content}");
+    }
+}
+#[test]
+fn empty_record_is_explicit_and_short_duration_keeps_seconds() {
+    let mut s = snapshot();
+    s.title.clear();
+    s.note.clear();
+    s.tags.clear();
+    s.category_name = None;
+    s.end_at_ms = s.start_at_ms + 23_000;
+    s.duration_seconds = 23;
+    let content = render_content(&s, DEFAULT_TEMPLATE, true);
+    for expected in [
+        "未命名记录",
+        "未填写备注",
+        "未分类",
+        "未添加标签",
+        "有效时长 | 23 秒",
+        "暂停合计 | 0 秒",
+    ] {
+        assert!(content.contains(expected));
+    }
+}
+#[test]
+fn detailed_record_respects_explicit_note_privacy() {
+    let content = render_content(&snapshot(), DEFAULT_TEMPLATE, false);
+    assert!(!content.contains("第二节卡了很久"));
+    assert!(content.contains("备注未同步"));
+}
+#[test]
+fn legacy_default_upgrades_but_custom_template_is_preserved() {
+    let s = snapshot();
+    assert_eq!(
+        render_content(&s, dotlog_memos::LEGACY_DEFAULT_TEMPLATE, true),
+        render_content(&s, DEFAULT_TEMPLATE, true)
+    );
+    assert_eq!(
+        render_content(&s, "自定义：{title}", false),
+        format!("自定义：{}", s.title)
+    );
+}
+#[test]
+fn user_text_is_not_reinterpreted_as_template_placeholders() {
+    let mut s = snapshot();
+    s.title = "讨论 {note} 与 {segmentId}".into();
+    s.note = "原文 {tags}".into();
+    let content = render_content(&s, DEFAULT_TEMPLATE, true);
+    assert!(content.contains("讨论 {note} 与 {segmentId}"));
+    assert!(content.contains("原文 {tags}"));
+}
+#[test]
+fn cross_day_record_contains_both_dates() {
+    let mut s = snapshot();
+    s.start_at_ms = local_ms(23, 50);
+    s.end_at_ms = s.start_at_ms + 30 * 60 * 1000;
+    s.duration_seconds = 30 * 60;
+    let content = render_content(&s, DEFAULT_TEMPLATE, true);
+    assert!(content.contains("2026-10-29 23:50:00"));
+    assert!(content.contains("2026-10-30 00:20:00"));
+}
+
+#[test]
+fn publish_renders_latest_saved_metadata_instead_of_queued_stub() {
+    struct Latest(SegmentSnapshot);
+    impl dotlog_plugin_sdk::SegmentQuery for Latest {
+        fn segments_between(&self, _: i64, _: i64) -> Result<Vec<SegmentSnapshot>, PluginError> {
+            Ok(vec![self.0.clone()])
+        }
+    }
+    let mut s = snapshot();
+    s.id = "seg-1".into();
+    s.title = "结束后补写的标题".into();
+    s.note = "结束后保存的详细备注".into();
+    let latest = Latest(s);
+    let http = MockHttp::with_rule(
+        "POST",
+        "/api/v1/memos",
+        FakeResponse::Http(200, r#"{"name":"memos/123"}"#),
+    );
+    let secrets = MockSecrets { token: Some("tok") };
+    let settings = settings(vec![("includeNote", json!(true))]);
+    let links = MockLinks::default();
+    let mut env = handler_env(&http, &secrets, &settings, &links);
+    env.segments = Some(&latest);
+    assert_done(
+        PublishHandler.handle(&publish_payload(), &env),
+        Some("memos/123"),
+    );
+    let calls = http.captured.lock().unwrap();
+    let body: serde_json::Value = serde_json::from_str(calls[0].body.as_ref().unwrap()).unwrap();
+    let text = body["content"].as_str().unwrap();
+    assert!(text.contains("结束后补写的标题"));
+    assert!(text.contains("结束后保存的详细备注"));
+    assert!(text.contains("有效时长"));
+}
+#[test]
+fn category_cannot_break_summary_table() {
+    let mut s = snapshot();
+    s.category_name = Some("学习 | 数学\n必修".into());
+    assert!(render_content(&s, DEFAULT_TEMPLATE, true).contains("学习 \\| 数学 必修"));
 }

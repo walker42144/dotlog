@@ -2,8 +2,8 @@
 //!
 //! 数据库只保存覆盖值；应用 scope 的读取结果是「默认值 ⊕ 覆盖值」。
 
-use serde_json::{Map, Value};
 use dotlog_domain::DayPolicy;
+use serde_json::{Map, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::ports::{Clock, TimerStore};
@@ -68,6 +68,12 @@ pub fn day_policy_of(settings: &Value) -> DayPolicy {
 /// 校验单个设置项；`app` scope 的键必须已知且取值合法。
 pub fn validate_entry(scope: &str, key: &str, value: &Value) -> AppResult<()> {
     if scope != APP_SCOPE {
+        if ["token", "apiKey", "api_key", "password", "secret"].contains(&key) {
+            return Err(AppError::store(
+                "E_SETTING_INVALID",
+                "敏感凭据必须使用系统钥匙串接口",
+            ));
+        }
         return Ok(());
     }
     let invalid = || AppError::store("E_SETTING_INVALID", format!("设置项 {key} 的值非法"));
@@ -150,8 +156,7 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
         let rows: Vec<(String, String)> = entries
             .into_iter()
             .map(|(key, value)| {
-                let raw = serde_json::to_string(&value)
-                    .unwrap_or_else(|_| "null".to_string());
+                let raw = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
                 (key, raw)
             })
             .collect();

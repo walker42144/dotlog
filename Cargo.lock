@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-ai"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "dotlog-plugin-sdk",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-application"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "dotlog-domain",
  "serde",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-desktop"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "dotlog-ai",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-domain"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -907,16 +907,17 @@ dependencies = [
 
 [[package]]
 name = "dotlog-memos"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "dotlog-plugin-sdk",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "dotlog-plugin-host"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "dotlog-application",
  "dotlog-domain",
@@ -929,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-plugin-sdk"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -938,11 +939,12 @@ dependencies = [
 
 [[package]]
 name = "dotlog-storage"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "dotlog-application",
  "dotlog-domain",
  "rusqlite",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
@@ -950,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-tomatodo"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "dotlog-application",

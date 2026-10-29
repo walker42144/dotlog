@@ -1,0 +1,9 @@
+{
+  "id": "local-daily-review",
+  "name": "每日复盘",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "按日期汇总有效记录、查看任务，并保存自己的复盘。",
+  "author": "DotLog 示例",
+  "permissions": ["segments:read", "storage"]
+}

@@ -83,6 +83,8 @@ export function SettingsPage({
   onNotify,
   onDataChanged
 }: SettingsPageProps) {
+  const [exportRange, setExportRange] = useState("all");
+  const [networkPlugins, setNetworkPlugins] = useState<string[]>([]);
   const [settings, setSettings] = useState<SettingsMap | null>(null);
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -110,6 +112,7 @@ export function SettingsPage({
         if (!cancelled) setLoadError(friendlyMessage(toIpcError(reason)));
       });
     void loadBackups();
+    void ipc.integrationList().then((list) => { if (!cancelled) setNetworkPlugins(list.filter((p) => p.enabled && p.capabilities.includes("network")).map((p) => p.name)); });
     return () => {
       cancelled = true;
     };
@@ -120,6 +123,7 @@ export function SettingsPage({
       setBusy(entries.map((entry) => entry.key).join(","));
       try {
         setSettings(await ipc.settingsPatch(APP_SCOPE, entries));
+        window.dispatchEvent(new Event("dotlog:settings-changed"));
       } catch (reason) {
         onNotify(friendlyMessage(toIpcError(reason)), "error");
       } finally {
@@ -172,7 +176,7 @@ export function SettingsPage({
       await ipc.backupRestore(entry.path);
       setRestoreTarget(null);
       onDataChanged();
-      onNotify("已恢复备份，建议重启应用以确保状态一致");
+      onNotify("已恢复备份并刷新状态；恢复前副本已保留，联网插件已暂停，请核对后重新启用");
     } catch (reason) {
       onNotify(friendlyMessage(toIpcError(reason)), "error");
     } finally {
@@ -182,7 +186,7 @@ export function SettingsPage({
 
   const exportData = async (format: ExportFormat) => {
     const to = Date.now();
-    const from = to - 30 * DAY_MS;
+    const from = exportRange === "all" ? -8_640_000_000_000_000 : to - 30 * DAY_MS;
     setBusy(`export-${format}`);
     try {
       const result = await ipc.exportData(format, from, to);
@@ -390,7 +394,7 @@ export function SettingsPage({
         <div className="setting-row">
           <div className="setting-row__text">
             <label>自动备份</label>
-            <p>每天首次启动时生成一次快照，按下方策略滚动保留。</p>
+            <p>每天使用时生成一次快照，常驻跨日也会检查，按下方策略滚动保留。</p>
           </div>
           <label className="switch">
             <input
@@ -454,6 +458,11 @@ export function SettingsPage({
           </div>
         </div>
 
+        <div className="plugin-manager-actions">
+          <button className="ghost-btn" onClick={() => void ipc.dataOpenFolder("backups")}>打开备份目录</button>
+          <button className="ghost-btn" onClick={() => void ipc.dataOpenFolder("restore-safety")}>恢复前安全副本</button>
+          <button className="ghost-btn" onClick={() => void ipc.dataOpenFolder("exports")}>打开导出目录</button>
+        </div>
         {backups.length === 0 ? (
           <p className="panel__empty">还没有备份文件</p>
         ) : (
@@ -480,9 +489,10 @@ export function SettingsPage({
         <div className="setting-row setting-row--stack">
           <div className="setting-row__text">
             <label>导出 / 导入</label>
-            <p>导出最近 30 天；导入只写入无冲突的行。</p>
+            <p>可导出全部记录或最近30天；导入只写入无冲突的行。完整设置恢复请使用数据库备份。</p>
           </div>
           <div className="settings-actions">
+            <select className="field__input setting-control" aria-label="导出范围" value={exportRange} onChange={(e) => setExportRange(e.target.value)}><option value="all">全部记录</option><option value="30days">最近30天</option></select>
             <button
               type="button"
               className="ghost-btn"
@@ -527,9 +537,9 @@ export function SettingsPage({
         <div className="setting-row">
           <div className="setting-row__text">
             <label>联网集成</label>
-            <p>当前未启用任何联网插件，桌面端所有数据都只写入本机数据库。</p>
+            <p>{networkPlugins.length ? `已启用：${networkPlugins.join("、")}。这些插件可向配置的服务发送授权内容。` : "未启用联网插件；本地记录保存在本机。侧边 Memos 也使用插件联网权限。"}</p>
           </div>
-          <span className="badge">未启用</span>
+          <span className="badge">{networkPlugins.length ? "联网集成已启用" : "联网集成未启用"}</span>
         </div>
       </section>
 
@@ -540,7 +550,7 @@ export function SettingsPage({
             <label>版本</label>
             <p>数据目录：%APPDATA%\dotlog · 备份与导出在各自子目录。</p>
           </div>
-          <span className="settings-version">v0.1.0</span>
+          <span className="settings-version">v0.1.6</span>
         </div>
         <div className="setting-row">
           <div className="setting-row__text">

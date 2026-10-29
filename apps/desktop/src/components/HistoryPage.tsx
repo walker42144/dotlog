@@ -50,13 +50,23 @@ export function HistoryPage({ dayVersion, onEditSegment }: HistoryPageProps) {
     return () => window.clearTimeout(id);
   }, [text]);
 
-  const { from: monthFrom, to: monthTo } = useMemo(() => monthWindow(monthCursor), [monthCursor]);
+  const { from: monthFrom, to: monthTo } = useMemo(() => monthWindow(monthCursor), [monthCursor, dayVersion]);
 
   // 月历圆点：扫一遍当月段，标记有记录的逻辑日。
   useEffect(() => {
     let cancelled = false;
-    void ipc
-      .historyQuery({ from: monthFrom, to: monthTo, limit: MONTH_SCAN_LIMIT, offset: 0 })
+    const allMonth = async () => {
+      const items: SegmentView[] = [];
+      let total = Infinity;
+      while (items.length < total) {
+        const page = await ipc.historyQuery({ from: monthFrom, to: monthTo, limit: MONTH_SCAN_LIMIT, offset: items.length });
+        if (cancelled) return { items: [] };
+        items.push(...page.items); total = page.total;
+        if (!page.items.length) break;
+      }
+      return { items };
+    };
+    void allMonth()
       .then((view) => {
         if (cancelled) return;
         setMonthDays(new Set(view.items.map((segment) => dayKeyOf(segment.startAt))));
@@ -156,7 +166,7 @@ export function HistoryPage({ dayVersion, onEditSegment }: HistoryPageProps) {
       cells.push({ key, day });
     }
     return cells;
-  }, [monthCursor]);
+  }, [monthCursor, dayVersion]);
 
   const monthTitle = `${monthCursor.getFullYear()} 年 ${monthCursor.getMonth() + 1} 月`;
 

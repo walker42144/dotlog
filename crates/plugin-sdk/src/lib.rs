@@ -70,8 +70,11 @@ pub fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginError> {
             manifest.api_version, API_VERSION
         )));
     }
-    let id_ok =
-        !manifest.id.is_empty() && manifest.id.chars().all(|c| c.is_ascii_lowercase() || c == '-');
+    let id_ok = !manifest.id.is_empty()
+        && manifest
+            .id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '-');
     if !id_ok {
         return Err(PluginError::Manifest(format!(
             "插件 id `{}` 只允许小写字母与连字符",
@@ -187,6 +190,12 @@ pub trait HttpClient: Send + Sync {
 
 /// `segments:read` 能力：只读段查询。
 pub trait SegmentQuery: Send + Sync {
+    fn segment_by_id(&self, id: &str) -> Result<Option<SegmentSnapshot>, PluginError> {
+        Ok(self
+            .segments_between(i64::MIN / 2, i64::MAX / 2)?
+            .into_iter()
+            .find(|s| s.id == id))
+    }
     fn segments_between(
         &self,
         from_ms: i64,
@@ -305,6 +314,7 @@ pub enum OutboxOutcome {
 
 /// handler 运行环境：按插件能力裁决后注入。
 pub struct OutboxEnv<'a> {
+    pub segments: Option<&'a dyn SegmentQuery>,
     pub http: Option<&'a dyn HttpClient>,
     pub secrets: Option<&'a dyn SecretStore>,
     pub settings: &'a dyn PluginSettings,

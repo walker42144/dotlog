@@ -131,7 +131,7 @@ fn backup_and_restore_round_trip() {
     let version: i64 = db
         .read(|conn| Ok(conn.query_row("PRAGMA user_version", [], |row| row.get(0))?))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 #[test]
@@ -139,7 +139,9 @@ fn restore_rejects_missing_or_invalid_file() {
     let dir = tempfile::tempdir().unwrap();
     let db = Database::open(dir.path().join("dotlog.db"), NOW).unwrap();
 
-    let missing = db.restore_from(&dir.path().join("nope.db"), NOW).unwrap_err();
+    let missing = db
+        .restore_from(&dir.path().join("nope.db"), NOW)
+        .unwrap_err();
     assert_eq!(missing.code(), "E_RESTORE_INVALID");
 
     // 不是 SQLite 数据库 → quick_check 失败。

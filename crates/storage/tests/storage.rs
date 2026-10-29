@@ -36,8 +36,8 @@ fn migrations_apply_once_and_are_idempotent() {
         })
         .unwrap();
 
-    assert_eq!(version, 2);
-    assert_eq!(count, 2);
+    assert_eq!(version, 3);
+    assert_eq!(count, 3);
 }
 
 #[test]
@@ -232,7 +232,11 @@ fn mark_point_undone_hides_latest_point() {
 fn runtime_state_roundtrip_and_upsert() {
     let db = Database::open_in_memory(NOW).unwrap();
 
-    assert_eq!(db.read(|conn| repo::runtime_get(conn, "heartbeat.wall_ms")).unwrap(), None);
+    assert_eq!(
+        db.read(|conn| repo::runtime_get(conn, "heartbeat.wall_ms"))
+            .unwrap(),
+        None
+    );
 
     db.read(|conn| repo::runtime_set(conn, "heartbeat.wall_ms", "100", NOW))
         .unwrap();
@@ -250,7 +254,7 @@ fn runtime_state_roundtrip_and_upsert() {
         .unwrap();
     assert_eq!(value, "200");
     assert_eq!(updated, NOW + 1_000);
-    assert_eq!(db.read(repo::schema_version).unwrap(), 2);
+    assert_eq!(db.read(repo::schema_version).unwrap(), 3);
 }
 
 #[test]
@@ -270,7 +274,9 @@ fn integrity_report_detects_overlap_and_counts_active() {
     })
     .unwrap();
 
-    let report = db.read(|conn| repo::integrity_report(conn, NOW + 30 * 60_000)).unwrap();
+    let report = db
+        .read(|conn| repo::integrity_report(conn, NOW + 30 * 60_000))
+        .unwrap();
     assert!(report.quick_check_ok);
     assert_eq!(report.active_count, 0);
     assert_eq!(report.overlap_pairs, 1);
@@ -349,7 +355,7 @@ fn ten_thousand_segments_stay_within_budget() {
     assert_eq!(report.overlap_pairs, 0);
     assert_eq!(
         reopened.read(repo::schema_version).unwrap(),
-        2,
+        3,
         "重新打开后 schema 版本应保持"
     );
 
@@ -363,8 +369,14 @@ fn ten_thousand_segments_stay_within_budget() {
     );
 
     // 预算按 debug 构建宽松设定；release 下远低于此值。
-    assert!(insert_elapsed.as_millis() < 10_000, "10k 段写入超预算：{insert_elapsed:?}");
-    assert!(query_elapsed.as_millis() < 2_000, "单日查询超预算：{query_elapsed:?}");
+    assert!(
+        insert_elapsed.as_millis() < 10_000,
+        "10k 段写入超预算：{insert_elapsed:?}"
+    );
+    assert!(
+        query_elapsed.as_millis() < 2_000,
+        "单日查询超预算：{query_elapsed:?}"
+    );
     assert!(
         integrity_elapsed.as_millis() < 2_000,
         "完整性自检超预算：{integrity_elapsed:?}"
@@ -390,11 +402,23 @@ fn outbox_enqueue_dedupes_by_key_and_takes_due_in_order() {
     let db = Database::open_in_memory(NOW).unwrap();
 
     assert!(db
-        .read(|conn| repo::outbox_enqueue(conn, Some("memos:a:publish"), "memos.publish", "{}", NOW))
+        .read(|conn| repo::outbox_enqueue(
+            conn,
+            Some("memos:a:publish"),
+            "memos.publish",
+            "{}",
+            NOW
+        ))
         .unwrap());
     // 重复去重键被忽略。
     assert!(!db
-        .read(|conn| repo::outbox_enqueue(conn, Some("memos:a:publish"), "memos.publish", "{}", NOW))
+        .read(|conn| repo::outbox_enqueue(
+            conn,
+            Some("memos:a:publish"),
+            "memos.publish",
+            "{}",
+            NOW
+        ))
         .unwrap());
     // 无去重键允许重复。
     assert!(db
@@ -402,7 +426,9 @@ fn outbox_enqueue_dedupes_by_key_and_takes_due_in_order() {
         .unwrap());
 
     // 到期按创建顺序取走并转 inflight（新事件无 next_retry 视为立即到期）。
-    let due = db.read(|conn| repo::outbox_take_due(conn, NOW + 5, 10)).unwrap();
+    let due = db
+        .read(|conn| repo::outbox_take_due(conn, NOW + 5, 10))
+        .unwrap();
     assert_eq!(due.len(), 2);
     assert!(due.iter().all(|record| record.state == "inflight"));
     assert!(due.iter().all(|record| record.attempts == 0));
@@ -411,7 +437,10 @@ fn outbox_enqueue_dedupes_by_key_and_takes_due_in_order() {
     let first = due[0].id.clone();
     db.read(|conn| repo::outbox_mark_retry(conn, &first, "网络不可达", NOW + 60_000, NOW + 6))
         .unwrap();
-    assert!(db.read(|conn| repo::outbox_take_due(conn, NOW + 7, 10)).unwrap().is_empty());
+    assert!(db
+        .read(|conn| repo::outbox_take_due(conn, NOW + 7, 10))
+        .unwrap()
+        .is_empty());
 
     // 5 分钟后：first 的退避时间已到（重新入队），另一条的 inflight 租约也已过期（回收）。
     let recovered = db
@@ -430,7 +459,11 @@ fn outbox_retry_backoff_ends_in_failed_and_manual_retry_resets() {
     db.read(|conn| repo::outbox_enqueue(conn, Some("memos:b:publish"), "memos.publish", "{}", NOW))
         .unwrap();
     let id = db
-        .read(|conn| Ok(repo::outbox_list(conn, Some("pending"), 10).unwrap()[0].id.clone()))
+        .read(|conn| {
+            Ok(repo::outbox_list(conn, Some("pending"), 10).unwrap()[0]
+                .id
+                .clone())
+        })
         .unwrap();
 
     // 退避：30s → 2min → 10min → 1h → 6h；第 6 次失败转 failed。
@@ -440,29 +473,51 @@ fn outbox_retry_backoff_ends_in_failed_and_manual_retry_resets() {
         now += 1;
         db.read(|conn| repo::outbox_mark_retry(conn, &id, "网络不可达", now + gap, now))
             .unwrap();
-        let record = db.read(|conn| Ok(repo::outbox_list(conn, None, 10).unwrap().remove(0)))
+        let record = db
+            .read(|conn| Ok(repo::outbox_list(conn, None, 10).unwrap().remove(0)))
             .unwrap();
         assert_eq!(record.attempts, attempt as i64 + 1);
-        assert_eq!(record.state, "pending", "第 {} 次重试后仍应为 pending", attempt + 1);
+        assert_eq!(
+            record.state,
+            "pending",
+            "第 {} 次重试后仍应为 pending",
+            attempt + 1
+        );
     }
 
     now += 1;
-    db.read(|conn| repo::outbox_mark_retry(conn, &id, "网络不可达", now, now)).unwrap();
-    let record = db.read(|conn| Ok(repo::outbox_list(conn, Some("failed"), 10).unwrap().remove(0)))
+    db.read(|conn| repo::outbox_mark_retry(conn, &id, "网络不可达", now, now))
+        .unwrap();
+    let record = db
+        .read(|conn| {
+            Ok(repo::outbox_list(conn, Some("failed"), 10)
+                .unwrap()
+                .remove(0))
+        })
         .unwrap();
     assert_eq!(record.state, "failed");
     assert_eq!(record.attempts, 6);
     assert_eq!(record.last_error.as_deref(), Some("网络不可达"));
 
     // 手动重试：attempts 清零、立即到期；done 的事件不允许复活。
-    assert!(db.read(|conn| repo::outbox_retry(conn, &id, NOW + 10)).unwrap());
-    let record = db.read(|conn| Ok(repo::outbox_list(conn, Some("pending"), 10).unwrap().remove(0)))
+    assert!(db
+        .read(|conn| repo::outbox_retry(conn, &id, NOW + 10))
+        .unwrap());
+    let record = db
+        .read(|conn| {
+            Ok(repo::outbox_list(conn, Some("pending"), 10)
+                .unwrap()
+                .remove(0))
+        })
         .unwrap();
     assert_eq!(record.attempts, 0);
     assert_eq!(record.next_retry_at_ms, Some(NOW + 10));
 
-    db.read(|conn| repo::outbox_mark_done(conn, &id, NOW + 11)).unwrap();
-    assert!(!db.read(|conn| repo::outbox_retry(conn, &id, NOW + 12)).unwrap());
+    db.read(|conn| repo::outbox_mark_done(conn, &id, NOW + 11))
+        .unwrap();
+    assert!(!db
+        .read(|conn| repo::outbox_retry(conn, &id, NOW + 12))
+        .unwrap());
 
     // 概览计数。
     let counts = db.read(repo::outbox_counts).unwrap();
@@ -474,7 +529,8 @@ fn integration_link_upsert_and_last_sync() {
     let db = Database::open_in_memory(NOW).unwrap();
     // integration_link.segment_id 有外键约束，先落一条真实段。
     let segment = new_segment(NOW);
-    db.read(|conn| repo::insert_segment(conn, &segment, NOW)).unwrap();
+    db.read(|conn| repo::insert_segment(conn, &segment, NOW))
+        .unwrap();
     let segment_id = segment.id.clone();
     let other_id;
     {
@@ -483,7 +539,8 @@ fn integration_link_upsert_and_last_sync() {
         let mut closed = other;
         closed.end_at_ms = Some(NOW + 120_000);
         other_id = closed.id.clone();
-        db.read(|conn| repo::insert_segment(conn, &closed, NOW)).unwrap();
+        db.read(|conn| repo::insert_segment(conn, &closed, NOW))
+            .unwrap();
     }
 
     assert!(db
@@ -531,8 +588,13 @@ fn integration_link_upsert_and_last_sync() {
     })
     .unwrap();
     assert_eq!(
-        db.read(|conn| repo::integration_last_sync(conn, "memos")).unwrap(),
+        db.read(|conn| repo::integration_last_sync(conn, "memos"))
+            .unwrap(),
         Some(NOW + 1_000)
     );
-    assert_eq!(db.read(|conn| repo::integration_last_sync(conn, "ai")).unwrap(), None);
+    assert_eq!(
+        db.read(|conn| repo::integration_last_sync(conn, "ai"))
+            .unwrap(),
+        None
+    );
 }

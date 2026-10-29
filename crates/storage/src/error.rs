@@ -5,6 +5,10 @@ pub type StorageResult<T> = Result<T, StorageError>;
 /// 持久层错误。业务层会把它映射为 IPC 错误码（见 `docs/ipc-contract.md` §5）。
 #[derive(Debug, Error)]
 pub enum StorageError {
+    #[error("记录已被其他操作修改，请刷新后重试")]
+    StaleRevision,
+    #[error("操作会产生重叠记录，已取消")]
+    Overlap,
     #[error("数据库错误：{0}")]
     Db(#[from] rusqlite::Error),
 
@@ -32,6 +36,8 @@ impl StorageError {
     /// 与 `docs/ipc-contract.md` §5 对齐的稳定错误码。
     pub fn code(&self) -> &'static str {
         match self {
+            Self::StaleRevision => "E_STALE_REVISION",
+            Self::Overlap => "E_OVERLAP",
             Self::ChecksumMismatch { .. } | Self::SchemaTooNew { .. } => "E_DB_CORRUPT",
             Self::BackupFailed(_) => "E_BACKUP_FAILED",
             Self::RestoreInvalid(_) => "E_RESTORE_INVALID",

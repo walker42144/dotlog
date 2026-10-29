@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
+import { PluginPage } from "./components/PluginPage";
+import { localPlugins, PLUGINS_CHANGED, type LocalPlugin } from "./lib/plugins";
+import { CommandPalette } from "./components/CommandPalette";
 import { AnalysisPage } from "./components/AnalysisPage";
 import { HistoryPage } from "./components/HistoryPage";
 import { IntegrationsPage } from "./components/IntegrationsPage";
@@ -15,8 +18,8 @@ import { TitleBar } from "./components/TitleBar";
 import { Toast, type ToastAction } from "./components/Toast";
 import { useDay } from "./hooks/useDay";
 import { useTimer } from "./hooks/useTimer";
-import { formatDateHeading, formatDuration } from "./lib/format";
-import { friendlyMessage, type SegmentView } from "./lib/ipc";
+import { configureDayStart, dayKeyOf, parseDayKey, formatDateHeading, formatDuration } from "./lib/format";
+import { ipc, friendlyMessage, type SegmentView } from "./lib/ipc";
 
 type Theme = "light" | "dark";
 
@@ -30,20 +33,61 @@ export default function App() {
     document.documentElement.dataset.theme === "dark" ? "dark" : "light"
   );
   const [page, setPage] = useState<PageKey>("today");
+  const [externalPlugins,setExternalPlugins]=useState<LocalPlugin[]>([]);
+  const [pluginNav,setPluginNav]=useState<Array<{id:string;name:string}>>([]);
+  useEffect(()=>{
+    let active=true;
+    const load=()=>{ void Promise.all([localPlugins.list(),ipc.integrationList(),localPlugins.sidebar()]).then(([local,builtin,prefs])=>{
+      if(!active)return;setExternalPlugins(local);
+      const nav=[...builtin.filter(p=>p.installed&&p.enabled&&(prefs?.[p.id]??p.id==="memos")).map(p=>({id:p.id,name:p.id==="memos"?"Memos":p.name})),...local.filter(p=>p.enabled&&p.showInSidebar).map(p=>({id:p.package.id,name:p.package.name}))];setPluginNav(nav);
+      setPage(current=>current.startsWith("plugin:")&&!builtin.some(p=>p.id===current.slice(7)&&p.installed&&p.enabled)&&!local.some(p=>p.package.id===current.slice(7)&&p.enabled)?"integrations":current==="memos"&&!builtin.some(p=>p.id==="memos"&&p.installed&&p.enabled)?"integrations":current);
+    }).catch(()=>{if(active)setPluginNav([]);});};
+    const open=(e:Event)=>{const id=(e as CustomEvent<string>).detail;if(typeof id==="string")setPage(`plugin:${id}`);};
+    load();window.addEventListener(PLUGINS_CHANGED,load);window.addEventListener("dotlog:settings-changed",load);window.addEventListener("dotlog:open-plugin",open);
+    return()=>{active=false;window.removeEventListener(PLUGINS_CHANGED,load);window.removeEventListener("dotlog:settings-changed",load);window.removeEventListener("dotlog:open-plugin",open);};
+  },[]);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const notify = useCallback((message: string, tone: "info" | "error" = "info") => setToast({ message, tone }), []);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
   const timer = useTimer();
   const day = useDay(timer.dayVersion);
-  const dates = formatDateHeading();
+  const [clockTick, setClockTick] = useState(0);
+  const [themePreference, setThemePreference] = useState("system");
+  const dates = formatDateHeading(parseDayKey(day.day?.date ?? dayKeyOf(Date.now())));
+  useEffect(() => {
+    const id = window.setInterval(() => setClockTick((v) => v + 1), 15_000);
+    return () => window.clearInterval(id);
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const load = () => { void ipc.settingsGet("app").then((settings) => {
+      if (!active) return;
+      configureDayStart(Number(settings["day.start_minutes"] ?? 240));
+      setClockTick((v) => v + 1);
+      const preference = String(settings["ui.theme"] ?? "system");
+      setThemePreference(preference);
+      const dark = preference === "dark" || (preference === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      setTheme(dark ? "dark" : "light");
+    }); };
+    load(); window.addEventListener("dotlog:settings-changed", load);
+    return () => { active = false; window.removeEventListener("dotlog:settings-changed", load); };
+  }, []);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => { if (themePreference === "system") setTheme(media.matches ? "dark" : "light"); };
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [themePreference]);
+  void clockTick;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     try {
-      localStorage.setItem("dotlog.theme", theme);
+      localStorage.setItem("dotlog.theme", themePreference);
     } catch {
       // 隐私模式下写入失败不影响使用。
     }
-  }, [theme]);
+  }, [theme, themePreference]);
 
   useEffect(() => {
     if (!timer.error) return;
@@ -77,12 +121,18 @@ export default function App() {
   }, [timer.undoRemaining, timer.undo]);
 
   const toggleTheme = useCallback(
-    () => setTheme((current) => (current === "dark" ? "light" : "dark")),
-    []
+    () => {
+      const next = theme === "dark" ? "light" : "dark";
+      setTheme(next); setThemePreference(next);
+      void ipc.settingsPatch("app", [{ key: "ui.theme", value: next }]).then(() => window.dispatchEvent(new Event("dotlog:settings-changed")));
+    },
+    [theme]
   );
 
   const openSegmentEditor = useCallback((segment: SegmentView, next: SegmentView | null) => {
-    setEditing({ mode: "edit", segment, nextSegment: next });
+    void Promise.all([ipc.segmentGet(segment.id), next ? ipc.segmentGet(next.id) : Promise.resolve(null)]).then(([original, nextSegment]) => {
+      setEditing({ mode: "edit", segment: original, nextSegment });
+    }).catch((e: unknown) => setToast({ message: e instanceof Error ? e.message : "读取记录失败，请重试", tone: "error" }));
   }, []);
 
   const openBackfill = useCallback((startAt: number, endAt: number) => {
@@ -97,7 +147,7 @@ export default function App() {
       : recording
         ? `记录中 · ${formatDuration(timer.elapsed)}`
         : state.paused
-          ? "暂停中"
+          ? `暂停中 · ${formatDuration(timer.elapsed)}`
           : "未开始";
 
   const undoToast =
@@ -112,6 +162,15 @@ export default function App() {
 
   return (
     <div className="app">
+      <CommandPalette commands={[
+        { label: "今天", description: "查看今天的时间线", action: () => setPage("today") },
+        { label: "历史", description: "查询和修正过去的记录", action: () => setPage("history") },
+        { label: "分析", description: "查看统计与分类", action: () => setPage("analysis") },
+        { label: "Memos", description: "使用插件 Token 查看笔记", action: () => setPage("memos") },
+        { label: "插件管理", description: "添加、移除或配置插件", action: () => setPage("integrations") },
+        { label: "设置与备份", description: "调整规则和保护数据", action: () => setPage("settings") },
+        { label: "立即备份", description: "为当前数据库创建快照", action: () => { void ipc.backupNow().then(() => setToast({ message: "已生成备份", tone: "info" })).catch(() => setToast({ message: "备份失败，请重试", tone: "error" })); } }
+      ]} />
       <TitleBar
         dateLabel={dates.compact}
         statusLabel={statusLabel}
@@ -121,7 +180,7 @@ export default function App() {
       />
 
       <div className={`app-body${page === "today" ? "" : " app-body--plain"}`}>
-        <SideNav page={page} onSelect={setPage} />
+        <SideNav page={page} onSelect={setPage} plugins={pluginNav} />
 
         <main className="app-main">
           {page === "today" && (
@@ -176,15 +235,16 @@ export default function App() {
 
           {page === "integrations" && (
             <IntegrationsPage
-              onNotify={(message, tone) => setToast({ message, tone: tone ?? "info" })}
+              onNotify={notify}
               onDataChanged={timer.refresh}
             />
           )}
 
+          {page.startsWith("plugin:") && (["ai","tomatodo"].includes(page.slice(7)) ? <IntegrationsPage key={page} focusPlugin={page.slice(7)} onNotify={notify} onDataChanged={timer.refresh}/> : externalPlugins.find(p=>p.package.id===page.slice(7)) ? <PluginPage key={page} plugin={externalPlugins.find(p=>p.package.id===page.slice(7))!}/> : <p>插件未安装或不可用</p>)}
           {page === "settings" && (
             <SettingsPage
               onThemeChange={setTheme}
-              onNotify={(message, tone) => setToast({ message, tone: tone ?? "info" })}
+              onNotify={notify}
               onDataChanged={timer.refresh}
             />
           )}

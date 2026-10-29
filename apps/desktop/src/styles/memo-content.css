@@ -1,0 +1,23 @@
+.memo-content { user-select: text; white-space: normal; overflow-wrap: anywhere; font-size: 14px; line-height: 1.8; margin-top: 20px; }
+.memo-content > :first-child { margin-top: 0; }
+.memo-content > :last-child { margin-bottom: 0; }
+.memo-content p { margin: 0 0 12px; white-space: pre-line; }
+.memo-content :is(h1,h2,h3,h4,h5,h6) { color: var(--text); font-weight: 600; line-height: 1.5; margin: 24px 0 12px; }
+.memo-content h1 { font-size: 22px; }
+.memo-content h2 { font-size: 18px; }
+.memo-content :is(h3,h4,h5,h6) { font-size: 16px; }
+.memo-content :is(ul,ol) { padding-left: 24px; margin: 12px 0; }
+.memo-content li { margin: 4px 0; }
+.memo-content li > p { margin: 0; }
+.memo-content blockquote { margin: 12px 0; padding: 4px 16px; border-left: 3px solid var(--brand); color: var(--text-muted); }
+.memo-content blockquote p { margin: 0; }
+.memo-content pre { overflow-x: auto; background: var(--surface); padding: 14px; border-radius: 8px; }
+.memo-content code { font-family: var(--font-mono); font-size: 0.9em; background: var(--surface); padding: 2px 4px; border-radius: 4px; }
+.memo-content pre code { padding: 0; }
+.memo-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 12px 0; }
+.memo-content :is(th,td) { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }
+.memo-content th { background: var(--surface-muted); }
+.memo-content a { color: var(--brand); text-decoration: underline; }
+.memo-content hr { border: 0; border-top: 1px solid var(--border); margin: 20px 0; }
+.memo-content .katex-display { overflow-x: auto; overflow-y: hidden; padding: 6px 0; }
+.memo-attachment { color: var(--text-muted); }
