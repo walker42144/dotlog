@@ -1,4 +1,4 @@
-import { THEMES } from "../lib/themes";
+import { THEMES, THEME_DETAILS } from "../lib/themes";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatDuration } from "../lib/format";
 import {
@@ -364,10 +364,11 @@ export function SettingsPage({
             <p>跟随系统会在系统切换深浅色时同步。</p>
           </div>
           <div className="theme-picker" role="group" aria-label="主题">
-            {THEMES.map(option => <button key={option.value} type="button" className="theme-choice" data-skin={option.value}
+            {THEMES.map(option => <button key={option.value} type="button" className="theme-choice" data-skin={option.value} aria-label={option.label}
               disabled={busy !== null} aria-pressed={readText("ui.theme", "system") === option.value}
               onClick={() => { void patch([{ key: "ui.theme", value: option.value }]); }}>
-              <span className="theme-choice__swatch" style={{ background: option.color }} aria-hidden="true" />{option.label}
+              <span className="theme-choice__swatch" style={{ background: option.color }} aria-hidden="true"><i /><i /><i /></span>
+              <span className="theme-choice__copy"><strong>{option.label}</strong><small>{THEME_DETAILS[option.value]}</small></span>
             </button>)}
           </div>
         </div>
@@ -542,7 +543,7 @@ export function SettingsPage({
             <label>版本</label>
             <p>数据目录：%APPDATA%\dotlog · 备份与导出在各自子目录。</p>
           </div>
-          <span className="settings-version">v0.1.17</span>
+          <span className="settings-version">v0.1.18</span>
         </div>
         <div className="setting-row">
           <div className="setting-row__text">

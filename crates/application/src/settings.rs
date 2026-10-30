@@ -114,7 +114,7 @@ pub fn validate_entry(scope: &str, key: &str, value: &Value) -> AppResult<()> {
         "ui.theme" => match value.as_str() {
             Some(
                 "light" | "dark" | "system" | "paper" | "forest" | "ocean" | "lavender" | "rose"
-                | "grid" | "folio" | "console" | "glass",
+                | "grid" | "folio" | "console" | "glass" | "acrylic" | "obsidian" | "ceramic",
             ) => Ok(()),
             _ => Err(invalid()),
         },

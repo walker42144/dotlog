@@ -6,7 +6,7 @@
           stored = null;
         }
         var theme =
-          ["light", "dark", "paper", "forest", "ocean", "lavender", "rose", "grid", "folio", "console", "glass"].includes(stored)
+          ["light", "dark", "paper", "forest", "ocean", "lavender", "rose", "grid", "folio", "console", "glass", "acrylic", "obsidian", "ceramic"].includes(stored)
             ? stored
             : window.matchMedia("(prefers-color-scheme: dark)").matches
               ? "dark"

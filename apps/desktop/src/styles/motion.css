@@ -18,3 +18,9 @@ button[aria-busy="true"] { cursor: progress; }
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   button:active { transform: none; }
 }
+
+/* Fixed dialogs retain their centering transform during the entrance. */
+.modal[role="dialog"] { animation: centered-dialog-open 180ms ease-out; }
+@keyframes centered-dialog-open { from { opacity: 0; transform: translate(-50%, -48%) scale(.985); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+
+:root[data-motion="reduced"] .modal[role="dialog"] { animation: none !important; }

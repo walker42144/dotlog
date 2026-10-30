@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-ai"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "chrono",
  "dotlog-plugin-sdk",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-application"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "dotlog-domain",
  "serde",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-desktop"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "chrono",
  "dotlog-ai",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-domain"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "serde",
  "serde_json",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-memos"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "chrono",
  "dotlog-plugin-sdk",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-plugin-host"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "dotlog-application",
  "dotlog-domain",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-plugin-sdk"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "serde",
  "serde_json",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-storage"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "dotlog-application",
  "dotlog-domain",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "dotlog-tomatodo"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "chrono",
  "dotlog-application",
