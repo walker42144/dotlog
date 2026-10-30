@@ -9,6 +9,10 @@
 > - 作者不对因使用本软件造成的任何数据丢失或损失承担责任
 > - 遇到问题欢迎提 Issue，但请自行评估是否适合用于关键场景
 
+## 源码更新 · v0.1.19
+
+修复右侧概览贴近滚动条的问题，增加 24px 留白并保留原内容宽度；发布构建增加本机路径重映射与残留检查。[变更与验证](docs/sidebar-spacing-0.1.19.md)。下方下载链接仍指向最近已发布的安装包。
+
 ## 当前版本 · v0.1.18
 
 [下载 Windows 正式安装包](https://github.com/walker42144/dotlog/releases/tag/v0.1.18) · [主题精修与验证](docs/ui-materials-0.1.18.md) · [基础功能审查](docs/release-0.1.17.md)
@@ -70,7 +74,7 @@ cd apps/desktop
 npm run tauri dev
 
 # 打包 Windows 安装包（NSIS）
-npm run tauri build -- --bundles nsis
+powershell -NoProfile -File ../../scripts/build-release.ps1
 ```
 
 产物位于 `target/release/bundle/nsis/`。
