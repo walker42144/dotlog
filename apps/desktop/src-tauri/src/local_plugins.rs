@@ -59,12 +59,15 @@ pub fn parse_package(text: &str) -> Result<Package, String> {
     {
         return Err("版本格式应为1.0.0".into());
     }
-    if p.permissions.len() > 2
-        || p.permissions
-            .iter()
-            .any(|v| !matches!(v.as_str(), "segments:read" | "storage"))
+    if p.permissions.len() > 3
+        || p.permissions.iter().any(|v| {
+            !matches!(
+                v.as_str(),
+                "segments:read" | "storage" | "tomatodo:link" | "tomatodo:history"
+            )
+        })
     {
-        return Err("当前仅支持segments:read与storage权限".into());
+        return Err("不支持的插件权限".into());
     }
     Ok(p)
 }
@@ -122,6 +125,9 @@ pub fn local_plugin_install(
         return Err(fail("最多安装50个本地插件"));
     }
     // Updates also require a fresh enable action: newly requested grants never become active silently.
+    if map.contains_key(&p.id) {
+        super::tomatodo_link::stop(state.inner(), &p.id)?;
+    }
     let installed = Installed {
         package: p,
         enabled: false,
@@ -142,6 +148,7 @@ pub fn local_plugin_change(
     let _guard = LOCK.lock().map_err(|_| fail("插件锁不可用"))?;
     let mut map = registry(&state)?;
     let p = map.get_mut(&id).ok_or_else(|| fail("插件未安装"))?;
+    let newly_enabled = enabled && !p.enabled;
     if enabled {
         parse_package(&serde_json::to_string(&p.package).map_err(|_| fail("插件清单转换失败"))?)
             .map_err(fail)?;
@@ -151,7 +158,14 @@ pub fn local_plugin_change(
     if remove {
         map.remove(&id);
     }
-    save(&state, &map)
+    if !enabled || remove {
+        super::tomatodo_link::stop(state.inner(), &id)?;
+    }
+    save(&state, &map)?;
+    if newly_enabled && !remove && link_authorized(&state, &id)? {
+        set_auto_link(&state, &id, true)?;
+    }
+    Ok(())
 }
 #[tauri::command]
 pub fn plugin_sidebar_get(state: tauri::State<'_, AppState>) -> IpcResult<Value> {
@@ -179,8 +193,13 @@ fn authorize(p: &Installed, method: &str) -> IpcResult<()> {
         return Err(fail("插件未启用"));
     }
     let permission = match method {
+        "tomatodo.scan" | "tomatodo.import" | "tomatodo.compare" | "tomatodo.analyze" => {
+            "tomatodo:history"
+        }
         "day.get" => "segments:read",
         "storage.get" | "storage.set" => "storage",
+        "link.status" | "link.enable" | "link.disable" | "link.startNext" | "link.endSegment"
+        | "link.saveNote" | "link.skipNote" | "link.reconcile" => "tomatodo:link",
         _ => return Err(fail("插件API不支持此操作")),
     };
     if !p.package.permissions.iter().any(|v| v == permission) {
@@ -189,17 +208,63 @@ fn authorize(p: &Installed, method: &str) -> IpcResult<()> {
     Ok(())
 }
 #[tauri::command]
-pub fn local_plugin_rpc(
-    state: tauri::State<'_, AppState>,
+pub async fn local_plugin_rpc(
+    app: tauri::AppHandle,
+    id: String,
+    method: String,
+    params: Value,
+) -> IpcResult<Value> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        local_plugin_rpc_inner(state.inner(), &app, id, method, params)
+    })
+    .await
+    .map_err(|e| fail(format!("插件操作失败：{e}")))?
+}
+fn local_plugin_rpc_inner(
+    state: &AppState,
+    app: &tauri::AppHandle,
     id: String,
     method: String,
     params: Value,
 ) -> IpcResult<Value> {
     let _guard = LOCK.lock().map_err(|_| fail("插件锁不可用"))?;
-    let p = registry(&state)?
+    let p = registry(state)?
         .remove(&id)
         .ok_or_else(|| fail("插件未安装"))?;
     authorize(&p, &method)?;
+    if let Some(action) = method.strip_prefix("link.") {
+        return super::tomatodo_link::rpc(state, app, &id, action, &params);
+    }
+    if method.starts_with("tomatodo.") {
+        if method == "tomatodo.import" {
+            crate::ensure_ready(state)?;
+        }
+        if method != "tomatodo.import" {
+            drop(_guard);
+        }
+        let result = match method.as_str() {
+            "tomatodo.scan" => {
+                serde_json::to_value(super::integrations::tomatodo_scan_inner(state)?)
+            }
+            "tomatodo.import" => {
+                serde_json::to_value(super::integrations::tomatodo_import_inner(state)?)
+            }
+            "tomatodo.compare" => {
+                serde_json::to_value(super::integrations::tomatodo_compare_inner(state)?)
+            }
+            "tomatodo.analyze" => {
+                serde_json::to_value(super::integrations::tomatodo_analyze_inner(state)?)
+            }
+            _ => return Err(fail("不支持的历史操作")),
+        };
+        if method == "tomatodo.import" {
+            use tauri::Emitter;
+            let _ = app.emit("dotlog://link-changed", ());
+        }
+        return result.map_err(|_| fail("历史结果转换失败"));
+    }
     match method.as_str() {
         "day.get" => {
             let date = params
@@ -209,20 +274,129 @@ pub fn local_plugin_rpc(
             serde_json::to_value(state.timer.day(Some(date)).map_err(IpcError::from)?)
                 .map_err(|_| fail("记录转换失败"))
         }
-        "storage.get" => read(&state, &format!("data:{id}")),
+        "storage.get" => read(state, &format!("data:{id}")),
         "storage.set" => {
             if params.to_string().len() > 64 * 1024 {
                 return Err(fail("每个插件的数据限64KB"));
             }
-            write(&state, &format!("data:{id}"), &params)?;
+            write(state, &format!("data:{id}"), &params)?;
             Ok(Value::Null)
         }
         _ => unreachable!(),
     }
 }
+
+pub fn link_authorized(state: &AppState, id: &str) -> IpcResult<bool> {
+    Ok(registry(state)?
+        .get(id)
+        .is_some_and(|p| authorize(p, "link.status").is_ok()))
+}
+
+// Called while LOCK is held, before taking the runtime gate. This is the same
+// lock order as install/change/RPC, so disable and update cannot race restoration.
+pub fn set_auto_link(state: &AppState, id: &str, enabled: bool) -> IpcResult<()> {
+    let mut config = read(state, "tomatodo-autoconnect")?;
+    if config.is_null() {
+        config = json!({});
+    }
+    if !config.is_object() {
+        return Err(fail("自动连接配置损坏，请先导出诊断"));
+    }
+    config[id] = json!(enabled);
+    if enabled {
+        config["preferred"] = json!(id);
+    }
+    write(state, "tomatodo-autoconnect", &config)
+}
+
+fn auto_link_candidate(map: &BTreeMap<String, Installed>, config: &Value) -> Option<String> {
+    if !config.is_null() && !config.is_object() {
+        return None;
+    }
+    let eligible = |id: &str, plugin: &Installed| {
+        authorize(plugin, "link.status").is_ok()
+            && config.get(id).and_then(Value::as_bool) != Some(false)
+    };
+    if let Some(id) = config.get("preferred").and_then(Value::as_str) {
+        if map.get(id).is_some_and(|p| eligible(id, p)) {
+            return Some(id.to_owned());
+        }
+    }
+    let mut candidates = map.iter().filter(|(id, p)| eligible(id, p));
+    let first = candidates.next()?.0.clone();
+    candidates.next().is_none().then_some(first)
+}
+
+pub fn restore_auto_link(state: &AppState, app: &tauri::AppHandle) -> IpcResult<()> {
+    let _guard = LOCK.lock().map_err(|_| fail("插件锁不可用"))?;
+    if super::tomatodo_link::enabled(state) {
+        return Ok(());
+    }
+    let map = registry(state)?;
+    let config = read(state, "tomatodo-autoconnect")?;
+    if let Some(id) = auto_link_candidate(&map, &config) {
+        let package = &map.get(&id).ok_or_else(|| fail("插件已移除"))?.package;
+        parse_package(&serde_json::to_string(package).map_err(|_| fail("插件清单转换失败"))?)
+            .map_err(fail)?;
+        super::tomatodo_link::start(state, app, &id)?;
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn link_plugin(id: &str, enabled: bool) -> Installed {
+        let mut p = package();
+        p["id"] = json!(id);
+        p["permissions"] = json!(["tomatodo:link"]);
+        Installed {
+            package: parse_package(&p.to_string()).unwrap(),
+            enabled,
+            show_in_sidebar: true,
+        }
+    }
+    #[test]
+    fn automatic_link_requires_enabled_grant_and_respects_persistent_pause() {
+        let mut map = BTreeMap::new();
+        map.insert("local-link".into(), link_plugin("local-link", true));
+        assert_eq!(
+            auto_link_candidate(&map, &Value::Null).as_deref(),
+            Some("local-link")
+        );
+        map.get_mut("local-link").unwrap().show_in_sidebar = false;
+        assert_eq!(
+            auto_link_candidate(&map, &Value::Null).as_deref(),
+            Some("local-link")
+        );
+        assert_eq!(
+            auto_link_candidate(&map, &json!({"local-link":false})),
+            None
+        );
+        map.get_mut("local-link").unwrap().enabled = false;
+        assert_eq!(auto_link_candidate(&map, &Value::Null), None);
+        let p = map.get_mut("local-link").unwrap();
+        p.enabled = true;
+        p.package.permissions.clear();
+        assert_eq!(auto_link_candidate(&map, &Value::Null), None);
+    }
+    #[test]
+    fn multiple_automatic_links_require_a_valid_preferred_owner() {
+        let map = BTreeMap::from([
+            ("local-one".into(), link_plugin("local-one", true)),
+            ("local-two".into(), link_plugin("local-two", true)),
+        ]);
+        assert_eq!(auto_link_candidate(&map, &Value::Null), None);
+        assert_eq!(
+            auto_link_candidate(&map, &json!({"preferred":"local-two"})).as_deref(),
+            Some("local-two")
+        );
+        assert_eq!(
+            auto_link_candidate(&map, &json!({"preferred":"local-two","local-two":false}))
+                .as_deref(),
+            Some("local-one")
+        );
+        assert_eq!(auto_link_candidate(&map, &json!([])), None);
+    }
     fn package() -> Value {
         json!({"id":"local-demo", "name":"示例", "version":"1.0.0", "apiVersion":1, "author":"Demo", "description":"示例", "permissions":["storage"], "script":"DotLog.render({blocks:[]})"})
     }
@@ -262,5 +436,59 @@ mod tests {
     #[test]
     fn enforces_package_limit() {
         assert!(parse_package(&" ".repeat(256 * 1024 + 1)).is_err());
+    }
+    #[test]
+    fn link_grant_is_explicit_and_never_allows_raw_timer_or_observer_calls() {
+        let mut p = Installed {
+            package: parse_package(&package().to_string()).unwrap(),
+            enabled: true,
+            show_in_sidebar: true,
+        };
+        assert!(authorize(&p, "link.enable").is_err());
+        p.package.permissions.push("tomatodo:link".into());
+        for method in [
+            "link.status",
+            "link.enable",
+            "link.disable",
+            "link.startNext",
+            "link.endSegment",
+            "link.saveNote",
+            "link.skipNote",
+            "link.reconcile",
+        ] {
+            assert!(authorize(&p, method).is_ok());
+        }
+        for method in ["timer.start", "link.observe", "link.sql", "process.spawn"] {
+            assert!(authorize(&p, method).is_err());
+        }
+        p.enabled = false;
+        assert!(authorize(&p, "link.enable").is_err());
+    }
+    #[test]
+    fn history_is_an_explicit_optional_grant_and_revocation_blocks_every_action() {
+        let mut p = Installed {
+            package: parse_package(&package().to_string()).unwrap(),
+            enabled: true,
+            show_in_sidebar: false,
+        };
+        p.package.permissions = vec!["tomatodo:link".into()];
+        assert!(authorize(&p, "link.status").is_ok());
+        assert!(authorize(&p, "tomatodo.import").is_err());
+        p.package.permissions.push("tomatodo:history".into());
+        for method in [
+            "tomatodo.scan",
+            "tomatodo.import",
+            "tomatodo.compare",
+            "tomatodo.analyze",
+        ] {
+            assert!(authorize(&p, method).is_ok());
+        }
+        for method in ["tomatodo.sql", "tomatodo.readFile", "process.spawn"] {
+            assert!(authorize(&p, method).is_err());
+        }
+        p.enabled = false;
+        for method in ["link.status", "tomatodo.scan", "tomatodo.import"] {
+            assert!(authorize(&p, method).is_err());
+        }
     }
 }

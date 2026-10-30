@@ -1,8 +1,16 @@
 {
   "name": "dotlog",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.17",
   "workspaces": [
     "apps/*"
-  ]
+  ],
+  "overrides": {
+    "rehype-katex": {
+      "katex": "^0.19.1"
+    },
+    "micromark-extension-math": {
+      "katex": "^0.19.1"
+    }
+  }
 }

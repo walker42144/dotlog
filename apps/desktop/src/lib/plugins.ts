@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ipc, IS_TAURI } from "./ipc";
+import { previewLink } from "./tomatodo-preview";
 export interface PluginPackage {
   id: string;
   name: string;
@@ -86,13 +87,25 @@ async function call<T>(
       break;
     case "local_plugin_rpc": {
       const permission =
-        args.method === "day.get"
+        String(args.method).startsWith("tomatodo.") ? "tomatodo:history" : String(args.method).startsWith("link.") ? "tomatodo:link" : args.method === "day.get"
           ? "segments:read"
           : args.method === "storage.get" || args.method === "storage.set"
             ? "storage"
             : "unsupported";
       if (!p?.enabled || !p.package.permissions.includes(permission))
         throw new Error("插件未启用或未授权此操作");
+      if (String(args.method).startsWith("tomatodo.")) {
+        switch(args.method) {
+          case "tomatodo.scan": result=await ipc.tomatodoScan();break;
+          case "tomatodo.import": result=await ipc.tomatodoImport();break;
+          case "tomatodo.compare": result=await ipc.tomatodoCompare();break;
+          case "tomatodo.analyze": result=await ipc.tomatodoAnalyze();break;
+        }
+        break;
+      }
+      if (String(args.method).startsWith("link.")) {
+        result=previewLink(String(args.method).slice(5),(args.params||{}) as Record<string,unknown>); break;
+      }
       if (args.method === "day.get")
         result = await ipc.dayGet(
           String((args.params as { date: string }).date),

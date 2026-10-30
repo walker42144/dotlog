@@ -36,11 +36,11 @@ export function StatusPanel({
         : "正在读取本地数据…";
 
   return (
-    <section className="status-card" aria-label="当前记录状态">
+    <section className="status-card" data-phase={tone} aria-label="当前记录状态">
       <div>
         <div className="status-card__meta">
           <span className={`status-dot status-dot--${tone}`} />
-          <span className="status-card__label">{label}</span>
+          <span className="status-card__label" key={tone}>{label}</span>
           <span className="status-card__hint">{hint}</span>
         </div>
 

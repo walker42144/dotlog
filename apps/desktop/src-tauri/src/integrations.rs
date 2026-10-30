@@ -17,7 +17,7 @@ use dotlog_plugin_host::net::{host_of, KeyringStore, UreqClient};
 use dotlog_plugin_sdk::{CloseReason, HttpClient, PluginManifest, SecretStore, SegmentClosedEvent};
 use dotlog_tomatodo::{
     self as tomatodo, compare, resolve_db_path, scan, CompareResult, DotlogSegment, ImportResult,
-    ScanResult, TomatodoPlugin,
+    ScanResult,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -42,7 +42,6 @@ pub fn build_host(store: Arc<dyn TimerStore>) -> Arc<PluginHost> {
     host.register(Arc::new(MemosPlugin));
     host.register_handler(Arc::new(PublishHandler));
     host.register(Arc::new(AiPlugin));
-    host.register(Arc::new(TomatodoPlugin));
     host
 }
 
@@ -323,14 +322,19 @@ pub struct IntegrationTestResult {
 }
 
 #[tauri::command]
-pub fn integration_test(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> IpcResult<IntegrationTestResult> {
-    manifest_of(&state, &id)?;
-    let settings = plugin_settings(&state, &id);
+pub async fn integration_test(app: AppHandle, id: String) -> IpcResult<IntegrationTestResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        integration_test_inner(state.inner(), id)
+    })
+    .await
+    .map_err(|e| store_error("E_UNKNOWN", format!("连接测试失败：{e}")))?
+}
+fn integration_test_inner(state: &AppState, id: String) -> IpcResult<IntegrationTestResult> {
+    manifest_of(state, &id)?;
+    let settings = plugin_settings(state, &id);
     let result = match id.as_str() {
-        "memos" => test_memos(&state, &settings),
+        "memos" => test_memos(state, &settings),
         "ai" => test_ai(&settings),
         _ => Err(store_error("E_UNKNOWN", format!("未知集成：{id}"))),
     };
@@ -398,6 +402,11 @@ fn test_memos(
 
 /// AI 连接测试：请求 OpenAI 兼容的 `GET /models`。
 fn test_ai(settings: &serde_json::Map<String, serde_json::Value>) -> IpcResult<String> {
+    if PrivacyMode::from_setting(settings.get("privacyMode").and_then(|v| v.as_str()))
+        == PrivacyMode::Off
+    {
+        return Err(ai_error(AiError::PrivacyOff));
+    }
     let base_url = settings
         .get("baseUrl")
         .and_then(|value| value.as_str())
@@ -526,18 +535,35 @@ pub fn outbox_retry(
 
 // ---------- AI 命令 ----------
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSuggestionView {
+    #[serde(flatten)]
+    suggestion: AiSuggestion,
+    revision: u32,
+    original: SegmentView,
+}
+
 #[tauri::command]
-pub fn ai_suggest(
-    app_state: tauri::State<'_, AppState>,
+pub async fn ai_suggest(app: AppHandle, date: Option<String>) -> IpcResult<Vec<AiSuggestionView>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        ai_suggest_inner(state.inner(), date)
+    })
+    .await
+    .map_err(|e| store_error("E_UNKNOWN", format!("AI 任务失败：{e}")))?
+}
+fn ai_suggest_inner(
+    app_state: &AppState,
     date: Option<String>,
-) -> IpcResult<Vec<AiSuggestion>> {
+) -> IpcResult<Vec<AiSuggestionView>> {
     if !app_state.host.plugin_enabled(dotlog_ai::PLUGIN_ID) {
         return Err(store_error(
             "E_PLUGIN_DISABLED",
             "AI 助手未启用".to_string(),
         ));
     }
-    let settings = plugin_settings(&app_state, dotlog_ai::PLUGIN_ID);
+    let settings = plugin_settings(app_state, dotlog_ai::PLUGIN_ID);
     let privacy = PrivacyMode::from_setting(settings.get("privacyMode").and_then(|v| v.as_str()));
     if privacy == PrivacyMode::Off {
         return Err(store_error(
@@ -553,13 +579,27 @@ pub fn ai_suggest(
         .day(date.as_deref())
         .map_err(IpcError::from)?;
     let categories_rows = app_state.store.categories().map_err(IpcError::from)?;
-    let segments = app_state
+    let rows = app_state
         .store
         .day_segments(day.window_start, day.window_end)
-        .map_err(IpcError::from)?
+        .map_err(IpcError::from)?;
+    let rows = rows
         .iter()
-        .filter(|segment| !segment.is_active() && !segment.is_ignored)
-        .map(|segment| segment_snapshot(segment, &categories_rows))
+        .filter(|s| !s.is_active() && !s.is_ignored)
+        .collect::<Vec<_>>();
+    if rows.len() > 200 {
+        return Err(store_error(
+            "E_SETTING_INVALID",
+            "当日记录超过 200 条，请改用复盘功能".into(),
+        ));
+    }
+    let revisions: BTreeMap<_, _> = rows
+        .iter()
+        .map(|s| (s.id.clone(), SegmentView::from_segment(s, now_ms())))
+        .collect();
+    let segments = rows
+        .iter()
+        .map(|s| segment_snapshot(s, &categories_rows))
         .collect::<Vec<_>>();
     if segments.is_empty() {
         return Ok(Vec::new());
@@ -579,7 +619,119 @@ pub fn ai_suggest(
         categories,
         privacy,
     };
-    provider.classify(&client, &input).map_err(ai_error)
+    let result = provider.classify(&client, &input).map_err(ai_error)?;
+    Ok(result
+        .into_iter()
+        .filter_map(|suggestion| {
+            revisions
+                .get(&suggestion.segment_id)
+                .map(|revision| AiSuggestionView {
+                    revision: revision.revision,
+                    original: revision.clone(),
+                    suggestion,
+                })
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiReviewInput {
+    from: String,
+    to: String,
+    question: String,
+}
+#[tauri::command]
+pub async fn ai_review(
+    app: AppHandle,
+    input: AiReviewInput,
+) -> IpcResult<dotlog_ai::review::ReviewResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if !state.host.plugin_enabled("ai") {
+            return Err(store_error("E_PLUGIN_DISABLED", "请先启用 AI 助手".into()));
+        }
+        dotlog_ai::review::validate_range(&input.from, &input.to).map_err(ai_error)?;
+        let settings = plugin_settings(&state, "ai");
+        let privacy =
+            PrivacyMode::from_setting(settings.get("privacyMode").and_then(|v| v.as_str()));
+        if privacy == PrivacyMode::Off {
+            return Err(ai_error(AiError::PrivacyOff));
+        }
+        let start = state
+            .timer
+            .day(Some(&input.from))
+            .map_err(IpcError::from)?
+            .window_start;
+        let end = state
+            .timer
+            .day(Some(&input.to))
+            .map_err(IpcError::from)?
+            .window_end;
+        let categories = state.store.categories().map_err(IpcError::from)?;
+        let rows = state
+            .store
+            .day_segments(start, end)
+            .map_err(IpcError::from)?;
+        let segments = rows
+            .iter()
+            .filter(|s| !s.is_active() && !s.is_ignored)
+            .filter_map(|s| {
+                let mut snapshot = segment_snapshot(s, &categories);
+                snapshot.start_at_ms = snapshot.start_at_ms.max(start);
+                snapshot.end_at_ms = snapshot.end_at_ms.min(end);
+                if snapshot.end_at_ms <= snapshot.start_at_ms {
+                    return None;
+                }
+                snapshot.duration_seconds = (snapshot.end_at_ms - snapshot.start_at_ms) / 1000;
+                Some(snapshot)
+            })
+            .collect();
+        let provider = ai_provider(&settings)?;
+        let client = UreqClient {
+            allowed_hosts: host_of(&provider.base_url).into_iter().collect(),
+            timeout_ms: 45_000,
+        };
+        provider
+            .review(
+                &client,
+                &dotlog_ai::review::ReviewInput {
+                    from: input.from,
+                    to: input.to,
+                    question: input.question,
+                    segments,
+                    privacy,
+                },
+            )
+            .map_err(ai_error)
+    })
+    .await
+    .map_err(|e| store_error("E_UNKNOWN", format!("复盘任务失败：{e}")))?
+}
+
+#[tauri::command]
+pub async fn ai_models(app: AppHandle) -> IpcResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if !state.host.plugin_enabled("ai") {
+            return Err(store_error("E_PLUGIN_DISABLED", "请先启用 AI 助手".into()));
+        }
+        let settings = plugin_settings(&state, "ai");
+        if PrivacyMode::from_setting(settings.get("privacyMode").and_then(|v| v.as_str()))
+            == PrivacyMode::Off
+        {
+            return Err(ai_error(AiError::PrivacyOff));
+        }
+        let provider = ai_provider(&settings)?;
+        provider
+            .models(&UreqClient {
+                allowed_hosts: host_of(&provider.base_url).into_iter().collect(),
+                timeout_ms: 10_000,
+            })
+            .map_err(ai_error)
+    })
+    .await
+    .map_err(|e| store_error("E_UNKNOWN", format!("模型列表任务失败：{e}")))?
 }
 
 fn ai_provider(
@@ -605,6 +757,7 @@ fn ai_provider(
 
 fn ai_error(error: AiError) -> IpcError {
     let code = match &error {
+        AiError::InvalidInput(_) => "E_SETTING_INVALID",
         AiError::PrivacyOff => "E_PLUGIN_DISABLED",
         AiError::NotConfigured(_) => "E_INTEGRATION_NOT_CONFIGURED",
         AiError::Http(_, _) | AiError::Network(_) => "E_NETWORK",
@@ -630,6 +783,7 @@ pub fn ai_apply(
     app_state: tauri::State<'_, AppState>,
     input: AiApplyInput,
 ) -> IpcResult<SegmentView> {
+    crate::ensure_ready(app_state.inner())?;
     if !app_state.host.plugin_enabled("ai") {
         return Err(store_error("E_PLUGIN_DISABLED", "AI 插件未启用".into()));
     }
@@ -670,15 +824,8 @@ pub fn ai_apply(
 // ---------- 番茄Todo 集成命令 ----------
 
 /// 读取番茄Todo 数据库并返回预览（不写入）。
-#[tauri::command]
-pub fn tomatodo_scan(state: tauri::State<'_, AppState>) -> IpcResult<ScanResult> {
-    if !state.host.plugin_enabled("tomatodo") {
-        return Err(store_error(
-            "E_PLUGIN_DISABLED",
-            "请先添加并启用番茄Todo插件".into(),
-        ));
-    }
-    let settings = plugin_settings(&state, tomatodo::PLUGIN_ID);
+pub(crate) fn tomatodo_scan_inner(state: &AppState) -> IpcResult<ScanResult> {
+    let settings = plugin_settings(state, tomatodo::PLUGIN_ID);
     let db_path = settings
         .get(tomatodo::SETTING_DB_PATH)
         .and_then(|value| value.as_str());
@@ -687,15 +834,8 @@ pub fn tomatodo_scan(state: tauri::State<'_, AppState>) -> IpcResult<ScanResult>
 }
 
 /// 增量导入番茄Todo 专注记录为 DotLog 段。
-#[tauri::command]
-pub fn tomatodo_import(state: tauri::State<'_, AppState>) -> IpcResult<ImportResult> {
-    if !state.host.plugin_enabled("tomatodo") {
-        return Err(store_error(
-            "E_PLUGIN_DISABLED",
-            "请先添加并启用番茄Todo插件".into(),
-        ));
-    }
-    let settings = plugin_settings(&state, tomatodo::PLUGIN_ID);
+pub(crate) fn tomatodo_import_inner(state: &AppState) -> IpcResult<ImportResult> {
+    let settings = plugin_settings(state, tomatodo::PLUGIN_ID);
     let db_path = settings
         .get(tomatodo::SETTING_DB_PATH)
         .and_then(|value| value.as_str());
@@ -708,6 +848,14 @@ pub fn tomatodo_import(state: tauri::State<'_, AppState>) -> IpcResult<ImportRes
     for record in &db.pc_record {
         if !record.is_completed() {
             result.skipped_incomplete += 1;
+            continue;
+        }
+        if state
+            .store
+            .tomatodo_source_seen(record.start_date)
+            .map_err(IpcError::from)?
+        {
+            result.skipped_existing += 1;
             continue;
         }
         let key = format!("tomatodo.imported:{source_key}:{}", record.id);
@@ -757,15 +905,8 @@ pub fn tomatodo_import(state: tauri::State<'_, AppState>) -> IpcResult<ImportRes
 }
 
 /// 对比番茄Todo 记录与 DotLog 段（按时间重叠）。
-#[tauri::command]
-pub fn tomatodo_compare(state: tauri::State<'_, AppState>) -> IpcResult<CompareResult> {
-    if !state.host.plugin_enabled("tomatodo") {
-        return Err(store_error(
-            "E_PLUGIN_DISABLED",
-            "请先添加并启用番茄Todo插件".into(),
-        ));
-    }
-    compare_internal(state.inner())
+pub(crate) fn tomatodo_compare_inner(state: &AppState) -> IpcResult<CompareResult> {
+    compare_internal(state)
 }
 
 fn compare_internal(state: &AppState) -> IpcResult<CompareResult> {
@@ -825,15 +966,14 @@ pub struct TomatodoAnalysis {
     pub reason: String,
 }
 
-#[tauri::command]
-pub fn tomatodo_analyze(state: tauri::State<'_, AppState>) -> IpcResult<Vec<TomatodoAnalysis>> {
+pub(crate) fn tomatodo_analyze_inner(state: &AppState) -> IpcResult<Vec<TomatodoAnalysis>> {
     if !state.host.plugin_enabled(dotlog_ai::PLUGIN_ID) {
         return Err(store_error(
             "E_PLUGIN_DISABLED",
             "AI 助手未启用".to_string(),
         ));
     }
-    let ai_settings = plugin_settings(&state, dotlog_ai::PLUGIN_ID);
+    let ai_settings = plugin_settings(state, dotlog_ai::PLUGIN_ID);
     let privacy =
         PrivacyMode::from_setting(ai_settings.get("privacyMode").and_then(|v| v.as_str()));
     if privacy == PrivacyMode::Off {
@@ -844,7 +984,7 @@ pub fn tomatodo_analyze(state: tauri::State<'_, AppState>) -> IpcResult<Vec<Toma
     }
 
     // 先做对比。
-    let compare_result = compare_internal(state.inner())?;
+    let compare_result = compare_internal(state)?;
 
     // 只分析有 DotLog 段的配对。
     let analyzable: Vec<(usize, String, String)> = compare_result

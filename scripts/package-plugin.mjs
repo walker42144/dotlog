@@ -5,7 +5,7 @@ const folder = resolve(process.argv[2] || 'examples/plugins/daily-review');
 const manifest = JSON.parse(await readFile(join(folder, 'manifest.json'), 'utf8'));
 const script = await readFile(join(folder, 'plugin.js'), 'utf8');
 if (!/^local-[a-z0-9-]+$/.test(manifest.id) || manifest.apiVersion !== 1 || !/^\d+\.\d+\.\d+$/.test(manifest.version)) throw new Error('插件清单不合法');
-if (!Array.isArray(manifest.permissions) || manifest.permissions.some(p=>!['segments:read','storage'].includes(p))) throw new Error('包含不支持的权限');
+if (!Array.isArray(manifest.permissions) || manifest.permissions.some(p=>!['segments:read','storage','tomatodo:link','tomatodo:history'].includes(p))) throw new Error('包含不支持的权限');
 new vm.Script(script, { filename: 'plugin.js' });
 const text = JSON.stringify({ ...manifest, script }, null, 2) + '\n';
 if (Buffer.byteLength(text) > 262144) throw new Error('插件包超过256KB');

@@ -160,15 +160,19 @@ impl TimerStore for FakeStore {
 
     fn settings_reset(&self, scope: &str, key: Option<&str>) -> AppResult<()> {
         let key = key.map(str::to_string);
-        self.inner.lock().unwrap().settings.retain(|(stored_scope, stored_key, _)| {
-            if stored_scope != scope {
-                return true;
-            }
-            match &key {
-                Some(key) => stored_key != key,
-                None => false,
-            }
-        });
+        self.inner
+            .lock()
+            .unwrap()
+            .settings
+            .retain(|(stored_scope, stored_key, _)| {
+                if stored_scope != scope {
+                    return true;
+                }
+                match &key {
+                    Some(key) => stored_key != key,
+                    None => false,
+                }
+            });
         Ok(())
     }
 }
@@ -216,7 +220,10 @@ fn settings_merge_defaults_and_validate() {
     assert_eq!(defaults["ui.theme"], "system");
 
     let invalid = service
-        .settings_patch("app", vec![("punch.mode".into(), serde_json::json!("both"))])
+        .settings_patch(
+            "app",
+            vec![("punch.mode".into(), serde_json::json!("both"))],
+        )
         .unwrap_err();
     assert_eq!(invalid.code(), "E_SETTING_INVALID");
 
@@ -240,6 +247,31 @@ fn settings_merge_defaults_and_validate() {
     service.settings_reset("app", None).unwrap();
     let reset = service.settings(None).unwrap();
     assert_eq!(reset["punch.mode"], "stop");
+}
+
+#[test]
+fn themes_round_trip_through_settings_and_reject_unknown_values() {
+    let service = service(FakeStore::default());
+    for theme in [
+        "system", "light", "dark", "paper", "forest", "ocean", "lavender", "rose", "grid", "folio",
+        "console", "glass",
+    ] {
+        service
+            .settings_patch("app", vec![("ui.theme".into(), serde_json::json!(theme))])
+            .unwrap();
+        assert_eq!(service.settings(Some("app")).unwrap()["ui.theme"], theme);
+    }
+    assert_eq!(
+        service
+            .settings_patch(
+                "app",
+                vec![("ui.theme".into(), serde_json::json!("missing"))]
+            )
+            .unwrap_err()
+            .code(),
+        "E_SETTING_INVALID"
+    );
+    assert_eq!(service.settings(Some("app")).unwrap()["ui.theme"], "glass");
 }
 
 #[test]
@@ -272,20 +304,17 @@ fn stats_day_bucket_matches_segments() {
     assert_eq!(bucket.segment_count, 2);
     assert!((bucket.coverage_rate - 3_600.0 / 86_400.0).abs() < 1e-9);
     assert_eq!(bucket.by_category.len(), 2);
-    assert_eq!(bucket.by_category[0].category_id.as_deref(), Some("cat-work"));
+    assert_eq!(
+        bucket.by_category[0].category_id.as_deref(),
+        Some("cat-work")
+    );
     assert_eq!(bucket.by_category[0].seconds, 3_600);
 }
 
 #[test]
 fn stats_month_granularity_returns_one_bucket() {
     let store = FakeStore::default();
-    store.push_segment(closed(
-        "seg-a",
-        T0 - 3_600_000,
-        T0,
-        "阅读",
-        None,
-    ));
+    store.push_segment(closed("seg-a", T0 - 3_600_000, T0, "阅读", None));
     let service = service(store);
 
     let report = service
@@ -355,7 +384,13 @@ fn import_reports_conflicts_and_invalid_rows() {
 #[test]
 fn export_json_contains_schema_and_category_names() {
     let store = FakeStore::with_categories(&[("cat-life", "生活", "#b45309")]);
-    store.push_segment(closed("seg-a", T0 - 3_600_000, T0, "整理", Some("cat-life")));
+    store.push_segment(closed(
+        "seg-a",
+        T0 - 3_600_000,
+        T0,
+        "整理",
+        Some("cat-life"),
+    ));
     let service = service(store);
 
     let payload = service
@@ -372,14 +407,21 @@ fn export_json_contains_schema_and_category_names() {
 fn day_uses_start_minutes_from_settings() {
     let store = FakeStore::default();
     let service = service(store);
-    let default_start = dotlog_domain::parse_day_window("2026-10-26", TZ, 240).unwrap().0;
-    let midnight_start = dotlog_domain::parse_day_window("2026-10-26", TZ, 0).unwrap().0;
+    let default_start = dotlog_domain::parse_day_window("2026-10-26", TZ, 240)
+        .unwrap()
+        .0;
+    let midnight_start = dotlog_domain::parse_day_window("2026-10-26", TZ, 0)
+        .unwrap()
+        .0;
 
     let day = service.day(Some("2026-10-26")).unwrap();
     assert_eq!(day.window_start, default_start);
 
     service
-        .settings_patch("app", vec![("day.start_minutes".into(), serde_json::json!(0))])
+        .settings_patch(
+            "app",
+            vec![("day.start_minutes".into(), serde_json::json!(0))],
+        )
         .unwrap();
     let shifted = service.day(Some("2026-10-26")).unwrap();
     assert_eq!(shifted.window_start, midnight_start);
@@ -400,7 +442,10 @@ fn backfill_stores_category_and_focus_flags() {
             is_ignored: false,
         })
         .unwrap();
-    assert_eq!(created.category.as_ref().map(|c| c.name.as_str()), Some("娱乐"));
+    assert_eq!(
+        created.category.as_ref().map(|c| c.name.as_str()),
+        Some("娱乐")
+    );
     assert!(created.is_focus);
     assert!(!created.is_ignored);
 }
@@ -422,7 +467,10 @@ fn update_patch_sets_category_and_ignore_flag() {
             },
         )
         .unwrap();
-    assert_eq!(updated.category.as_ref().map(|c| c.id.as_str()), Some("cat-work"));
+    assert_eq!(
+        updated.category.as_ref().map(|c| c.id.as_str()),
+        Some("cat-work")
+    );
     assert!(updated.is_ignored);
 
     // null 清空分类。
@@ -437,4 +485,13 @@ fn update_patch_sets_category_and_ignore_flag() {
         )
         .unwrap();
     assert!(cleared.category.is_none());
+}
+
+#[test]
+fn motion_setting_accepts_only_known_preferences() {
+    use dotlog_application::settings::validate_entry;
+    for value in ["system", "reduced"] {
+        assert!(validate_entry("app", "ui.motion", &serde_json::json!(value)).is_ok());
+    }
+    assert!(validate_entry("app", "ui.motion", &serde_json::json!("unknown")).is_err());
 }

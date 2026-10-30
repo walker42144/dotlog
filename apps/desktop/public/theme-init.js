@@ -6,10 +6,12 @@
           stored = null;
         }
         var theme =
-          stored === "light" || stored === "dark"
+          ["light", "dark", "paper", "forest", "ocean", "lavender", "rose", "grid", "folio", "console", "glass"].includes(stored)
             ? stored
             : window.matchMedia("(prefers-color-scheme: dark)").matches
               ? "dark"
               : "light";
         document.documentElement.dataset.theme = theme;
+        try { document.documentElement.dataset.motion = localStorage.getItem("dotlog.motion") === "reduced" ? "reduced" : "system"; }
+        catch (e) { document.documentElement.dataset.motion = "system"; }
       })();

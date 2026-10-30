@@ -230,11 +230,17 @@ export interface OutboxView {
 
 /** AI 分类建议；只存在于内存，确认后才落库（plugin-sdk §8.2）。 */
 export interface AiSuggestion {
+  revision: number;
+  original?: SegmentView;
   segmentId: string;
   title: string | null;
   tags: string[];
   categoryId: string | null;
   reason: string;
+}
+
+export interface AiReviewResult {
+  markdown: string; recordCount: number; recordedSeconds: number; from: string; to: string; model: string;
 }
 
 export interface IntegrationTestResult {
@@ -446,6 +452,8 @@ export const ipc = {
   outboxList: (state?: OutboxState) => call<OutboxView[]>("outbox_list", { state: state ?? null }),
   outboxRetry: (id: string) => call<OutboxView>("outbox_retry", { id }),
   aiSuggest: (date?: string) => call<AiSuggestion[]>("ai_suggest", { date: date ?? null }),
+  aiModels: () => call<string[]>("ai_models"),
+  aiReview: (input: {from:string;to:string;question:string}) => call<AiReviewResult>("ai_review", {input}),
   aiApply: (input: AiApplyInput) => call<SegmentView>("ai_apply", { input }),
   tomatodoScan: () => call<TomatodoScanResult>("tomatodo_scan"),
   tomatodoImport: () => call<TomatodoImportResult>("tomatodo_import"),
@@ -538,6 +546,7 @@ const DEFAULT_SETTINGS: SettingsMap = {
   "notify.on_punch": true,
   "launch.at_login": false,
   "ui.theme": "system",
+  "ui.motion": "system",
   "backup.enabled": true,
   "backup.keep_daily": 7,
   "backup.keep_weekly": 4,
@@ -806,12 +815,13 @@ function mockUndo(): UndoResult {
   return { restoredSegment: mockActive, removedSegmentId: null };
 }
 
-function mockDay(): DayView {
+function mockDay(requestedDate?: string): DayView {
   const now = Date.now();
+  const reference = requestedDate ? new Date(`${requestedDate}T12:00:00`).getTime() : now;
   const tzOffsetMin = -new Date().getTimezoneOffset();
   const tzMs = tzOffsetMin * 60_000;
   const dayStartMs = DAY_START_MINUTES * 60_000;
-  const dayIndex = Math.floor((now + tzMs - dayStartMs) / DAY_MS);
+  const dayIndex = Math.floor((reference + tzMs - dayStartMs) / DAY_MS);
   const windowStart = dayIndex * DAY_MS + dayStartMs - tzMs;
   const windowEnd = windowStart + DAY_MS;
   const statsEnd = Math.min(windowEnd, Math.max(windowStart, now));
@@ -1565,12 +1575,13 @@ function mockIntegrationTest(id: string): IntegrationTestResult {
   };
 }
 
-function mockAiSuggest(): AiSuggestion[] {
+function mockAiSuggest(date?: string): AiSuggestion[] {
   if (!(mockEnabled.ai ?? false)) {
     throw makeError("E_PLUGIN_DISABLED", "AI 助手未启用");
   }
+  const range=dayWindowOf(new Date(`${date||dayKeyOf(Date.now())}T12:00:00`));
   const candidates = mockAllSegments()
-    .filter((segment) => !segment.isIgnored && segment.status === "closed")
+    .filter((segment) => !segment.isIgnored && segment.status === "closed" && segment.startAt<range.to && (segment.endAt??0)>range.from)
     .sort((left, right) => right.startAt - left.startAt)
     .slice(0, 4);
   if (candidates.length === 0) return [];
@@ -1579,6 +1590,7 @@ function mockAiSuggest(): AiSuggestion[] {
     const base = segment.title || "未命名记录";
     return {
       segmentId: segment.id,
+      revision: segment.revision,
       title: base.length <= 12 ? base : base.slice(0, 12),
       tags: index % 2 === 0 ? ["专注", "复盘"] : ["碎片"],
       categoryId: segment.category === null ? category.id : segment.category.id,
@@ -1653,9 +1665,8 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
     }
     case "timer_undo":
       return mockUndo() as T;
-    case "day_today":
-    case "day_get":
-      return mockDay() as T;
+    case "day_today": return mockDay() as T;
+    case "day_get": return mockDay(String(args?.date ?? "")) as T;
     case "segment_update":
       return mockUpdateSegment(args) as T;
     case "segment_backfill":
@@ -1755,7 +1766,14 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
       return { ...row } as T;
     }
     case "ai_suggest":
-      return mockAiSuggest() as T;
+      return mockAiSuggest(args?.date ? String(args.date) : undefined) as T;
+    case "ai_models": return ["演示模型", "qwen2.5:7b"] as T;
+    case "ai_review": {
+      const input=args?.input as {from:string;to:string;question:string};
+      const day=mockDay(input.to);
+      return {from:input.from,to:input.to,recordCount:day.segments.length,recordedSeconds:day.stats.recordedSeconds,model:"演示模型",
+        markdown:"## 本期概览\n这是浏览器模拟复盘，用于检查界面，不是真实模型分析。\n\n## 时间分配\n所选记录包含英语精读和工作活动。\n\n## 下一步建议\n- 给学习段补充具体章节。\n- 结合当天记录安排下一次复盘。"} as T;
+    }
     case "ai_apply":
       return mockAiApply(args) as T;
     case "tomatodo_scan":

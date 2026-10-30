@@ -113,7 +113,12 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
         )?;
 
         if !transition.effects.is_empty() {
-            self.store.commit(&transition.effects, at.utc_ms)?;
+            self.commit_link_closure(
+                &transition.effects,
+                state.active.as_ref().map(|s| s.id.as_str()),
+                action != RecoveryAction::Discard,
+                at,
+            )?;
         }
         self.store
             .set_runtime_state(CLEAN_SHUTDOWN_KEY, "false", at.utc_ms)?;

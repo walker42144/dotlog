@@ -105,6 +105,21 @@ pub trait TimerStore: Send + Sync {
     /// 在单个事务内应用全部变更；任一步失败必须整体回滚。
     fn commit(&self, effects: &[Effect], now_ms: i64) -> AppResult<()>;
 
+    /// Atomically persist link ownership/notes and timer facts. No non-atomic fallback.
+    fn commit_runtime(
+        &self,
+        _effects: &[Effect],
+        _key: &str,
+        _value: &str,
+        _now_ms: i64,
+    ) -> AppResult<()> {
+        Err(AppError::store("E_LINK_STORE", "存储未实现原子联动提交"))
+    }
+
+    fn tomatodo_source_seen(&self, _start_ms: i64) -> AppResult<bool> {
+        Ok(false)
+    }
+
     /// 与 `[from_ms, to_ms)` 相交的非删除段，按开始时间升序。
     fn day_segments(&self, from_ms: i64, to_ms: i64) -> AppResult<Vec<Segment>>;
 

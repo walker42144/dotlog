@@ -34,6 +34,8 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
     /// `backup_restore` 的核心：用备份覆盖当前库（成功后由 UI 重新拉取状态）。
     pub fn restore_from(&self, path: &Path) -> AppResult<()> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
-        self.store.restore_from(path, self.clock.now().utc_ms)
+        self.store.restore_from(path, self.clock.now().utc_ms)?;
+        *self.link_live.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(())
     }
 }

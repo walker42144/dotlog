@@ -5,7 +5,6 @@ use dotlog_application::{
     PointRecord, TimerSnapshot, TimerStore,
 };
 use dotlog_domain::{Effect, Segment};
-use rusqlite::OptionalExtension;
 
 use crate::db::Database;
 use crate::error::StorageError;
@@ -38,9 +37,33 @@ impl TimerStore for Database {
         .map_err(into_app_error)
     }
 
+    fn commit_runtime(
+        &self,
+        effects: &[Effect],
+        key: &str,
+        value: &str,
+        now_ms: i64,
+    ) -> AppResult<()> {
+        self.with_transaction(|tx| {
+            if !effects.is_empty() {
+                repo::apply_effects(tx, effects, now_ms)?;
+            }
+            if !effects.is_empty() && repo::integrity_report(tx, now_ms)?.overlap_pairs != 0 {
+                return Err(StorageError::Overlap);
+            }
+            repo::runtime_set(tx, key, value, now_ms)?;
+            Ok(())
+        })
+        .map_err(into_app_error)
+    }
+
     fn day_segments(&self, from_ms: i64, to_ms: i64) -> AppResult<Vec<Segment>> {
         self.read(|conn| repo::segments_overlapping(conn, from_ms, to_ms))
             .map_err(into_app_error)
+    }
+
+    fn tomatodo_source_seen(&self, start_ms: i64) -> AppResult<bool> {
+        self.read(|conn| Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM time_point WHERE source='plugin' AND undone_at_ms IS NULL AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.sourceStartedAt')=?1)",[start_ms],|row|row.get(0))?)).map_err(into_app_error)
     }
 
     fn find_segment(&self, id: &str) -> AppResult<Option<Segment>> {
@@ -54,17 +77,34 @@ impl TimerStore for Database {
     }
 
     fn publication_ready(&self, id: &str) -> AppResult<bool> {
+        if self
+            .read(|conn| repo::link_note_pending(conn, id))
+            .map_err(into_app_error)?
+        {
+            return Ok(false);
+        }
         self.read(|conn| Ok(conn.query_row("SELECT COALESCE((SELECT publish_ready FROM record_session WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)),1)",[id],|r|r.get(0))?)).map_err(into_app_error)
     }
 
     fn confirm_session(&self, id: &str, now_ms: i64) -> AppResult<()> {
+        if self
+            .read(|conn| repo::link_note_pending(conn, id))
+            .map_err(into_app_error)?
+        {
+            return Err(AppError::store(
+                "E_PENDING_NOTE",
+                "请在番茄联动面板确认该段备注",
+            ));
+        }
         self.read(|conn| { conn.execute("UPDATE record_session SET publish_ready=1,updated_at_ms=?2 WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",rusqlite::params![id,now_ms])?;Ok(()) }).map_err(into_app_error)
     }
 
     fn pending_note_segment(&self) -> AppResult<Option<Segment>> {
         self.read(|conn| {
-            let id=conn.query_row("SELECT anchor_segment_id FROM record_session WHERE status='finished' AND publish_ready=0 ORDER BY updated_at_ms ASC LIMIT 1",[],|r|r.get::<_,String>(0)).optional()?;
-            match id {Some(id)=>repo::find_segment_by_id(conn,&id),None=>Ok(None)}
+            let mut query=conn.prepare("SELECT anchor_segment_id FROM record_session WHERE status='finished' AND publish_ready=0 ORDER BY updated_at_ms ASC")?;
+            let ids=query.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+            for id in ids { if !repo::link_note_pending(conn,&id)? { return repo::find_segment_by_id(conn,&id); } }
+            Ok(None)
         }).map_err(into_app_error)
     }
 

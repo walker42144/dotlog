@@ -4,7 +4,7 @@
 
 ## 1. 安装、更新与移除
 
-打开“插件管理 → 从本地安装”，选择 `.dotlog-plugin.json` 文件。核对作者、版本和权限，确认安装，再打开“启用插件”。勾选“显示在侧边栏”后出现入口。修改显示偏好、隐藏、停用、移除均立即生效。
+打开“插件管理 → 从本地安装”，选择 `.dotlog-plugin.json` 文件。核对作者、版本和权限，确认安装，再打开“启用插件”。勾选“侧边栏入口”后出现入口。修改显示偏好、隐藏、停用、移除均立即生效。
 
 同ID更新须勾选“替换同ID插件”。更新保留插件数据，但新版本默认停用，须重新确认权限并启用。移除会停止插件并隐藏入口，保留数据以便重新安装；不会删除计时记录。插件包中的作者字段是作者自述，不是签名认证，只安装可信来源的包。
 
@@ -48,10 +48,12 @@ ID必须以 `local-` 开头，仅含小写字母、数字、连字符，长度3�
 | 无权限 | 本地计算和展示页面 |
 | `segments:read` | 按日期读取记录，包括标题、备注、分类和标签 |
 | `storage` | 读取和保存本插件自己的JSON数据，每插件64KB |
+| `tomatodo:link`（宿主0.1.7起） | 调用受限番茄联动接口：启停后台、读关联状态、独立分段、确认备注和核对截止时间 |
+| `tomatodo:history`（宿主0.1.15起） | 读取固定来源的历史数据、增量导入、对比；AI 分析还需另行启用 AI 助手 |
 
-脚本在页面打开时进入独立Worker运行，离开页面、停用或移除时销毁。不是后台任务或原生程序；没有DOM、Tauri命令通道、SQL连接、系统文件、令牌、网络发布、修改计时记录或调用其他插件的SDK能力。生产版CSP阻止远程网络请求；联网集成仍通过内置Rust插件实现。Worker不等于完整的恶意代码安全边界，仍须选择可信作者。
+脚本在页面打开时进入独立Worker运行，离开页面、停用或移除时销毁。不是后台任务或原生程序；没有DOM、任意Tauri命令通道、SQL连接、系统文件、令牌或网络发布能力。0.1.7的 `tomatodo:link` 只能通过宿主校验的关联用例修改分段，不能注入来源快照或操作无关记录。后台观察属于宿主，切换页面不会停止；停用/移除/更新活动插件须先处理当前分段。生产版CSP阻止远程网络请求。Worker不等于完整的恶意代码安全边界，仍须选择可信作者。
 
-首次显示或按钮操作5秒无响应会停止Worker，用户可重新加载。SDK请求10秒超时。页面最多100个组件、总数据256KB；每秒最多60条Worker消息，同时最多4个SDK请求。安装不执行脚本。恢复备份后所有插件均停用，用户须重新启用。
+首次显示5秒无响应会停止Worker，用户可重新加载。按钮操作最长等待30秒；SDK通常10秒超时，历史AI分析30秒。页面最多100个组件、总数据256KB；每秒最多60条Worker消息，同时最多4个SDK请求。安装不执行脚本。恢复备份后所有插件均停用，用户须重新启用。
 
 ## 4. JavaScript SDK
 
@@ -59,6 +61,14 @@ ID必须以 `local-` 开头，仅含小写字母、数字、连字符，长度3�
 
 ```js
 DotLog.today();                       // 本地日期，例如2026-10-29
+await DotLog.link.status();           // 以下link方法均需tomatodo:link
+await DotLog.link.enable();           // 显式启用宿主后台
+await DotLog.link.disable();          // 当前分段未结束会拒绝
+await DotLog.link.startNext();
+await DotLog.link.endSegment();
+await DotLog.link.saveNote({id,revision,note});
+await DotLog.link.skipNote({id,revision});
+await DotLog.link.reconcile({endAt});  // 用户确认的UTC毫秒截止时间；不会更改已关闭段
 await DotLog.getDay('2026-10-29');      // 需要segments:read
 await DotLog.storage.get();           // JSON对象或null
 await DotLog.storage.set({note:'复盘'}); // 覆盖本插件的数据
@@ -99,4 +109,14 @@ DotLog.onAction(async (action, values) => {
 
 ## 7. 与原有Rust插件SDK的关系
 
-`docs/plugin-sdk.md` 描述的是随主程序编译的Rust集成，提供Memos、AI和番茄Todo等能力；本规范描述可本地安装的UI Worker插件。二者不能混用manifest或打包格式。目前不支持加载外部Rust动态库、任意可执行文件、MCP服务或插件后台自动触发钩子。后续扩展新权限时应升级SDK、补宿主校验和测试，再开放给插件。
+`docs/plugin-sdk.md` 描述的是随主程序编译的Rust集成，提供Memos、AI等能力；本规范描述可本地安装的UI Worker插件。二者不能混用manifest或打包格式。不支持加载外部Rust动态库、任意可执行文件、MCP服务或任意插件后台钩子。`tomatodo:link` 是由宿主提供的单一受控后台，不会给插件开放原生进程执行或任意网络能力。联动插件示例在 `examples/plugins/tomatodo-link`。旧宿主会拒绝这个新权限，需要先更新宿主。
+
+## 0.1.15 扩展：独立页面与历史数据
+
+番茄联动 0.4.0 包的页面、实时/历史切换、状态文字与操作编排均在插件包内。DotLog 不再按旧番茄历史模块的开关创建同名入口；侧边栏严格取决于该本地插件的启用与显示状态。隐藏只隐藏入口，不停用；停用和移除停止观察器，保留计时记录及待补记数据。活动分段需先结束，再停用/更新/移除。
+
+`DotLog.tomatodo.scan()`、`.import()`、`.compare()`、`.analyze()` 均需 `tomatodo:history`。宿主逐次检查安装、启用和授权，不开放任意文件路径、SQL或网络。导入仍遵循原有重叠检查和实时来源去重。旧直接历史IPC和旧番茄内置插件不再注册；既有历史来源设置保留给受控接口使用。
+
+页面可额外声明 `tabs: [{id,label,action}]` 和 `activeTab`，最多5个标签。点击标签仍进入 `onAction`，由插件决定展示内容。按钮块支持 `disabled: boolean`。标签、字段和状态文字均由宿主按纯文本渲染，不解释为HTML。
+
+备注草稿以插件ID、字段ID和页面分组跟踪；切换标签不清除草稿，真正移出补记队列后才清理对应草稿。联动状态应按 `status.enabled && status.context.connected` 显示已连接；状态读取失败不可继续显示旧的已连接状态。

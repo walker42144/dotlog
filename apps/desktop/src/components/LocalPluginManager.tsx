@@ -36,7 +36,7 @@ export function LocalPluginManager() {
       localPlugins.sidebar(),
     ]);
     setPlugins(p);
-    setBuiltins(b);
+    setBuiltins(b.filter(p=>p.id!=="tomatodo"));
     setPrefs(s ?? {});
   };
   useEffect(() => {
@@ -63,7 +63,7 @@ export function LocalPluginManager() {
   return (
     <section className="settings-group">
       <div className="plugin-manager-actions">
-        <h2>本地插件与侧边栏</h2>
+        <h2>本地插件</h2>
         <button
           className="ghost-btn"
           disabled={busy}
@@ -99,9 +99,12 @@ export function LocalPluginManager() {
             const text = await selected.text();
             const pkg = JSON.parse(text) as PluginPackage;
             if (
-              !pkg.id?.startsWith("local-") ||
+              !pkg || typeof pkg.id !== "string" || !/^local-[a-z0-9-]{1,58}$/.test(pkg.id) ||
+              [pkg.name, pkg.description, pkg.author, pkg.version].some(value => typeof value !== "string") ||
+              !pkg.name.trim() || pkg.name.length > 80 || !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(pkg.version) ||
               pkg.apiVersion !== 1 ||
-              !Array.isArray(pkg.permissions) ||
+              !Array.isArray(pkg.permissions) || pkg.permissions.length > 3 ||
+              pkg.permissions.some(value => !["segments:read", "storage", "tomatodo:link", "tomatodo:history"].includes(value)) ||
               typeof pkg.script !== "string"
             )
               throw new Error("插件包格式不正确，请查看编写规范");
@@ -135,6 +138,10 @@ export function LocalPluginManager() {
                   ? "读取所选日期全部记录（含标题和备注）"
                   : p === "storage"
                     ? "保存本插件的数据"
+                      : p === "tomatodo:history"
+                        ? "读取番茄历史数据、增量导入、对比和分析（分析需另启用 AI）"
+                      : p === "tomatodo:link"
+                        ? "自动打开番茄并连接、启停后台联动、创建和结束关联分段、处理备注与核对时间"
                     : `不支持：${p}`,
               )
               .join("、") || "无"}
@@ -179,7 +186,7 @@ export function LocalPluginManager() {
         .filter((p) => p.installed)
         .map((p) => (
           <label className="setting-row" key={p.id}>
-            <span>{p.name} · 侧边栏入口</span>
+            <span>{p.id === "tomatodo" ? "番茄联动（历史功能）" : p.name} · 侧边栏入口</span>
             <input
               type="checkbox"
               checked={prefs[p.id] ?? p.id === "memos"}
@@ -230,7 +237,7 @@ export function LocalPluginManager() {
                   )
                 }
               />{" "}
-              显示在侧边栏
+              侧边栏入口
             </label>
             <button
               className="ghost-btn"

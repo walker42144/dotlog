@@ -1,3 +1,4 @@
+import { validPluginView } from "../lib/plugin-view";
 import { useEffect, useRef, useState } from "react";
 import { IS_TAURI } from "../lib/ipc";
 import { MemoContent } from "./MemoContent";
@@ -10,18 +11,24 @@ type Block = {
   value?: string;
   label?: string;
   action?: string;
+  disabled?: boolean;
   inputType?: "date" | "text";
 };
-type View = { title?: string; blocks: Block[] };
+type ViewTab = {id:string;label:string;action:string};
+type View = { title?: string; tabs?: ViewTab[]; activeTab?:string; blocks: Block[] };
 const BOOTSTRAP = `
 const requests=new Map();let next=0;let action=()=>{};
 const call=(method,params={})=>new Promise((resolve,reject)=>{
- const id=++next;const timer=setTimeout(()=>{requests.delete(id);reject(new Error('请求超时'));},10000);
+ const id=++next;const timer=setTimeout(()=>{requests.delete(id);reject(new Error('请求超时'));},method==='tomatodo.analyze'?30000:10000);
  requests.set(id,{resolve,reject,timer});postMessage({type:'rpc',id,method,params});
 });
 globalThis.DotLog=Object.freeze({
  render:view=>postMessage({type:'render',view}),
  getDay:date=>call('day.get',{date}),
+ tomatodo:Object.freeze({scan:()=>call('tomatodo.scan'),import:()=>call('tomatodo.import'),compare:()=>call('tomatodo.compare'),analyze:()=>call('tomatodo.analyze')}),
+ link:Object.freeze({status:()=>call('link.status'),enable:()=>call('link.enable'),disable:()=>call('link.disable'),
+ startNext:()=>call('link.startNext'),endSegment:()=>call('link.endSegment'),
+ saveNote:params=>call('link.saveNote',params),skipNote:params=>call('link.skipNote',params),reconcile:params=>call('link.reconcile',params)}),
  storage:Object.freeze({get:()=>call('storage.get'),set:data=>call('storage.set',data)}),
  onAction:handler=>{action=handler;},
  today:()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
@@ -31,21 +38,36 @@ onmessage=event=>{const m=event.data;
  if(m.type==='action')Promise.resolve().then(()=>action(m.action,m.values)).catch(e=>postMessage({type:'error',message:String(e)}));
 };
 `;
-export function PluginPage({ plugin }: { plugin: LocalPlugin }) {
+export function PluginPage({ plugin, embedded = false }: { plugin: LocalPlugin; embedded?: boolean }) {
+  const permissionsKey = plugin.package.permissions.join("\0");
   const [view, setView] = useState<View | null>(null),
     [error, setError] = useState(""),
     [revision, setRevision] = useState(0);
   const worker = useRef<Worker | null>(null),
     timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const form = useRef<HTMLDivElement>(null);
-  const watchdog = () => {
+  const draftIds = useRef<Record<string,string[]>>(Object.create(null));
+  const draftKey = (id: string) => `dotlog.pluginDraft:${plugin.package.id}:${id}`;
+  const noteDraft = (block: Block) => {
+    if (!block.id?.startsWith("note:") || !plugin.package.permissions.includes("tomatodo:link")) return block.value;
+    try { return localStorage.getItem(draftKey(block.id)) ?? block.value; } catch { return block.value; }
+  };
+  useEffect(() => {
+    if (!view) return;
+    const ids=view.blocks.map(b=>b.id).filter((id): id is string=>!!id?.startsWith("note:"));
+    const scope=view.activeTab??"default";
+    for (const id of draftIds.current[scope]??[]) if(!ids.includes(id)) { try {localStorage.removeItem(draftKey(id));} catch { /* draft storage unavailable */ } }
+    draftIds.current[scope]=ids;
+  }, [view, plugin.package.id]);
+  const watchdog = (timeout=5000) => {
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       worker.current?.terminate();
       setError("插件响应超时，已停止运行。可重试或在插件管理中停用。");
-    }, 5000);
+    }, timeout);
   };
   useEffect(() => {
+    draftIds.current = Object.create(null);
     setView(null);
     setError("");
     if (!plugin.enabled) return;
@@ -93,26 +115,8 @@ export function PluginPage({ plugin }: { plugin: LocalPlugin }) {
             setError("插件页面超过限制");
             return;
           }
-          const allowed = [
-            "heading",
-            "text",
-            "markdown",
-            "stat",
-            "input",
-            "textarea",
-            "button",
-          ];
-          const blocks = m.view.blocks;
-          if (
-            blocks.some(
-              (b: Block) =>
-                !b ||
-                !allowed.includes(b.type) ||
-                [b.text, b.value, b.id, b.label, b.action].some(
-                  (v) => v !== undefined && typeof v !== "string",
-                ),
-            )
-          ) {
+          if (!validPluginView(m.view)) {
+            stopped = true;
             w.terminate();
             setError("插件页面格式不正确");
             return;
@@ -165,19 +169,25 @@ export function PluginPage({ plugin }: { plugin: LocalPlugin }) {
       }
     };
     return () => {
+      stopped = true;
       clearTimeout(timer.current);
       w.terminate();
       URL.revokeObjectURL(url);
       worker.current = null;
     };
-  }, [plugin, revision]);
+  }, [plugin.package.id, plugin.package.script, plugin.enabled, permissionsKey, revision]);
+  const dispatchAction = (action?:string) => {
+    const values:Record<string,string>=Object.create(null);
+    form.current?.querySelectorAll<HTMLInputElement|HTMLTextAreaElement>("input[name],textarea[name]").forEach(e=>{values[e.name]=e.value;});
+    watchdog(30000);worker.current?.postMessage({type:"action",action,values});
+  };
   return (
-    <div className="settings-page">
-      <header className="page-head">
+    <div className={embedded ? "plugin-page plugin-page--embedded" : "settings-page plugin-page"}>
+      {!embedded && <header className="page-head">
         <h1>{plugin.package.name}</h1>
         <p>{plugin.package.description}</p>
         {!IS_TAURI && <span className="badge">浏览器预览 · 模拟记录</span>}
-      </header>
+      </header>}
       {!plugin.enabled ? (
         <p>插件未启用，请到插件管理中启用。</p>
       ) : (
@@ -194,9 +204,10 @@ export function PluginPage({ plugin }: { plugin: LocalPlugin }) {
             </p>
           )}
           {!view && !error && <p role="status">正在加载插件…</p>}
+          {view?.tabs && <div className="plugin-tabs" role="group" aria-label="插件功能">{view.tabs.map(t=><button key={t.id} aria-pressed={view.activeTab===t.id} onClick={()=>dispatchAction(t.action)}>{t.label}</button>)}</div>}
           {view && (
-            <div className="settings-group" ref={form}>
-              <h2>{typeof view.title === "string" ? view.title : ""}</h2>
+            <div className="settings-group plugin-view" ref={form}>
+              {!embedded && <h2>{typeof view.title === "string" ? view.title : ""}</h2>}
               {view.blocks.map((b, i) => {
                 const key = `${revision}:${b.id ?? i}`;
                 switch (b.type) {
@@ -206,9 +217,9 @@ export function PluginPage({ plugin }: { plugin: LocalPlugin }) {
                     return <MemoContent key={key} content={b.text ?? ""} />;
                   case "stat":
                     return (
-                      <div className="integration-card" key={key}>
+                      <div className="plugin-stat" key={key}>
                         <span>{b.label}</span>
-                        <strong style={{ display: "block", fontSize: 28 }}>
+                        <strong>
                           {b.value}
                         </strong>
                       </div>
@@ -216,13 +227,16 @@ export function PluginPage({ plugin }: { plugin: LocalPlugin }) {
                   case "input":
                   case "textarea":
                     return (
-                      <label className="field" key={key}>
+                      <label className="field plugin-field" key={key}>
                         <span className="field__label">{b.label}</span>
                         {b.type === "textarea" ? (
                           <textarea
                             className="field__input"
                             name={b.id}
-                            defaultValue={b.value}
+                            defaultValue={noteDraft(b)}
+                            onChange={event=>{if(b.id?.startsWith("note:")&&plugin.package.permissions.includes("tomatodo:link")) {
+                              try {localStorage.setItem(draftKey(b.id),event.currentTarget.value);} catch {setError("草稿保存失败，请先保存本段备注再离开页面");}
+                            }}}
                             maxLength={20000}
                             rows={5}
                           />
@@ -240,25 +254,10 @@ export function PluginPage({ plugin }: { plugin: LocalPlugin }) {
                   case "button":
                     return (
                       <button
-                        className="primary-btn primary-btn--sm"
+                        className={`plugin-action ${b.action === "end" || b.action === "next" || b.action === "enable" || b.action?.startsWith("save:") ? "primary-btn primary-btn--sm" : "ghost-btn"}`}
                         key={key}
-                        onClick={() => {
-                          const values: Record<string, string> =
-                            Object.create(null);
-                          form.current
-                            ?.querySelectorAll<
-                              HTMLInputElement | HTMLTextAreaElement
-                            >("input[name],textarea[name]")
-                            .forEach((e) => {
-                              values[e.name] = e.value;
-                            });
-                          watchdog();
-                          worker.current?.postMessage({
-                            type: "action",
-                            action: b.action,
-                            values,
-                          });
-                        }}
+                        disabled={b.disabled}
+                        onClick={()=>dispatchAction(b.action)}
                       >
                         {b.text ?? "执行"}
                       </button>

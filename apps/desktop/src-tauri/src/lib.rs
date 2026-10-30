@@ -19,6 +19,8 @@ mod diagnostics;
 mod integrations;
 mod local_plugins;
 mod log;
+mod tomatodo_link;
+mod tomatodo_observer;
 use backup::BackupEntry;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -54,6 +56,7 @@ struct RecoveryCache {
 }
 
 struct AppState {
+    link: tomatodo_link::Runtime,
     timer: Arc<TimerService<Database, SystemClock>>,
     /// 与 timer 共享同一连接的仓储句柄：插件宿主与 outbox 查询用。
     store: Arc<dyn TimerStore>,
@@ -110,6 +113,15 @@ fn fs_error(error: std::io::Error) -> IpcError {
 }
 
 fn app_dir() -> PathBuf {
+    if option_env!("DOTLOG_PREVIEW").is_some() {
+        if let Some(path) = std::env::var_os("DOTLOG_PROFILE_DIR") {
+            return PathBuf::from(path);
+        }
+        return std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ".".into())
+            .join("dotlog-preview");
+    }
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -236,6 +248,15 @@ fn quick_action(app: &AppHandle, pause: bool, source: PointSource) {
     }
     let result: IpcResult<Option<PunchResultView>> = (|| {
         let current = state.timer.get_state().map_err(IpcError::from)?;
+        if tomatodo_link::enabled(&state) {
+            if current.active.is_some() {
+                return tomatodo_link::manual_end(&state).map(Some);
+            }
+            if !pause {
+                tomatodo_link::manual_start(&state)?;
+            }
+            return Ok(None);
+        }
         if current.active.is_some() {
             let result = if pause {
                 state.timer.pause(source)
@@ -293,6 +314,10 @@ fn timer_start(
     source: Option<PointSource>,
 ) -> IpcResult<TimerStateView> {
     ensure_ready(state.inner())?;
+    if tomatodo_link::enabled(&state) {
+        tomatodo_link::manual_start(&state)?;
+        return state.timer.get_state().map_err(IpcError::from);
+    }
     state
         .timer
         .start(source_or_button(source))
@@ -305,6 +330,9 @@ fn timer_punch(
     source: Option<PointSource>,
 ) -> IpcResult<PunchResultView> {
     ensure_ready(state.inner())?;
+    if tomatodo_link::enabled(&state) {
+        return tomatodo_link::manual_end(&state);
+    }
     let result = state
         .timer
         .punch(source_or_button(source))
@@ -319,6 +347,9 @@ fn timer_pause(
     source: Option<PointSource>,
 ) -> IpcResult<PunchResultView> {
     ensure_ready(state.inner())?;
+    if tomatodo_link::enabled(&state) {
+        return tomatodo_link::manual_end(&state);
+    }
     let result = state
         .timer
         .pause(source_or_button(source))
@@ -333,6 +364,9 @@ fn timer_finish(
     source: Option<PointSource>,
 ) -> IpcResult<PunchResultView> {
     ensure_ready(state.inner())?;
+    if tomatodo_link::enabled(&state) {
+        return tomatodo_link::manual_end(&state);
+    }
     let result = state
         .timer
         .finish(source_or_button(source))
@@ -347,6 +381,12 @@ fn timer_finish(
 
 #[tauri::command]
 fn timer_undo(state: tauri::State<'_, AppState>) -> IpcResult<UndoResultView> {
+    if tomatodo_link::enabled(&state) {
+        return Err(store_error(
+            "E_TOMATODO_LINK",
+            "联动期间请在插件面板核对分段，暂不支持撤销".into(),
+        ));
+    }
     ensure_ready(state.inner())?;
     state.timer.undo().map_err(IpcError::from)
 }
@@ -585,6 +625,13 @@ fn backup_list() -> IpcResult<Vec<BackupEntry>> {
 
 #[tauri::command]
 fn backup_restore(state: tauri::State<'_, AppState>, path: String) -> IpcResult<()> {
+    let _link = state.link.gate.lock().map_err(|_| cache_error())?;
+    if tomatodo_link::enabled(&state) {
+        return Err(store_error(
+            "E_TOMATODO_LINK",
+            "请先停用番茄联动再恢复备份".into(),
+        ));
+    }
     let _lifecycle = state.host.lifecycle.lock().map_err(|_| cache_error())?;
     // Safety copies are not subject to rolling retention cleanup.
     let safe_dir = app_dir().join("restore-safety");
@@ -842,6 +889,7 @@ pub fn run() {
             let punch_shortcut = configured_shortcut(&timer);
             let notify_recovery = recovery_info.clone();
             app.manage(AppState {
+                link: tomatodo_link::Runtime::default(),
                 timer: Arc::clone(&timer),
                 store: Arc::clone(&store),
                 host: Arc::clone(&host),
@@ -856,6 +904,7 @@ pub fn run() {
 
             // outbox worker：先补发一次（应用关闭期间到期的任务），再按 30 s 轮询。
             integrations::spawn_worker(host, app.handle().clone());
+            tomatodo_link::spawn_worker(app.handle().clone());
 
             // 心跳：每 30 秒一次，用于下次启动检测休眠与长间隔。
             let heartbeat = Arc::clone(&timer);
@@ -949,11 +998,9 @@ pub fn run() {
             integrations::outbox_list,
             integrations::outbox_retry,
             integrations::ai_suggest,
+            integrations::ai_review,
+            integrations::ai_models,
             integrations::ai_apply,
-            integrations::tomatodo_scan,
-            integrations::tomatodo_import,
-            integrations::tomatodo_compare,
-            integrations::tomatodo_analyze
         ])
         .run(tauri::generate_context!())
         .expect("DotLog 启动失败");

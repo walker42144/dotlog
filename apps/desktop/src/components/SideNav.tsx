@@ -49,7 +49,7 @@ export function SideNav({ page, onSelect, plugins }: SideNavProps) {
       <div className="sidenav__foot">
         本地存储
         <br />
-        v0.1.6
+        v0.1.17
       </div>
     </nav>
   );

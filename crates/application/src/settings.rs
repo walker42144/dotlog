@@ -28,6 +28,7 @@ pub fn default_settings() -> Map<String, Value> {
     map.insert("notify.on_punch".into(), Value::from(true));
     map.insert("launch.at_login".into(), Value::from(false));
     map.insert("ui.theme".into(), Value::from("system"));
+    map.insert("ui.motion".into(), Value::from("system"));
     map.insert("backup.enabled".into(), Value::from(true));
     map.insert("backup.keep_daily".into(), Value::from(7));
     map.insert("backup.keep_weekly".into(), Value::from(4));
@@ -106,8 +107,15 @@ pub fn validate_entry(scope: &str, key: &str, value: &Value) -> AppResult<()> {
         "notify.on_punch" | "launch.at_login" | "backup.enabled" => {
             value.is_boolean().then_some(()).ok_or_else(invalid)
         }
+        "ui.motion" => match value.as_str() {
+            Some("system" | "reduced") => Ok(()),
+            _ => Err(invalid()),
+        },
         "ui.theme" => match value.as_str() {
-            Some("light") | Some("dark") | Some("system") => Ok(()),
+            Some(
+                "light" | "dark" | "system" | "paper" | "forest" | "ocean" | "lavender" | "rose"
+                | "grid" | "folio" | "console" | "glass",
+            ) => Ok(()),
             _ => Err(invalid()),
         },
         "backup.keep_daily" | "backup.keep_weekly" | "backup.keep_monthly" => {

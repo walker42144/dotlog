@@ -150,10 +150,16 @@ export function useTimer(): TimerController {
   }, [refreshDay]);
 
   useEffect(() => {
-    const onChanged = () => refresh();
+    let active = true;
+    const onChanged = () => { void ipc.settingsGet("app").then(settings => {
+      if (!active) return;
+      undoWindowMs.current = Number(settings["punch.undo_window_ms"] ?? 15_000);
+      promptOnPunch.current = settings["notify.on_punch"] !== false;
+      refreshDay();
+    }).catch((cause: unknown) => { if (active) setError(toIpcError(cause)); }); };
     window.addEventListener("dotlog:settings-changed", onChanged);
-    return () => window.removeEventListener("dotlog:settings-changed", onChanged);
-  }, [refresh]);
+    return () => { active = false; window.removeEventListener("dotlog:settings-changed", onChanged); };
+  }, [refreshDay]);
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
     const check = () => { void ipc.recoveryGet().then((info) => setRecovery(info.required ? info : null)).catch((cause: unknown) => setError(toIpcError(cause))); };
@@ -276,6 +282,9 @@ export function useTimer(): TimerController {
         return;
       }
       unlisteners.push(offPause);
+      const offLink = await listen("dotlog://link-changed", () => { refresh(); });
+      if (disposed) { offLink(); return; }
+      unlisteners.push(offLink);
     };
 
     void register().catch(() => {

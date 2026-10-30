@@ -25,6 +25,7 @@ pub struct TimerService<S: TimerStore, C: Clock> {
     pub(crate) clock: C,
     mode: PunchMode,
     pub(crate) operation: Mutex<()>,
+    pub(crate) link_live: Mutex<Option<crate::tomatodo_link::LinkState>>,
 }
 
 impl<S: TimerStore, C: Clock> TimerService<S, C> {
@@ -34,6 +35,7 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
             clock,
             mode,
             operation: Mutex::new(()),
+            link_live: Mutex::new(None),
         }
     }
 
@@ -499,12 +501,23 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
             crate::new_id(),
             crate::new_id(),
         )?;
-        self.commit(&transition)
+        self.commit_link_closure(&transition.effects, Some(id), false, at)
     }
 
     /// `segment_split`：在指定时刻拆成两段，返回 `[前半, 后半]`。
     pub fn split_segment(&self, id: &str, at_ms: i64) -> AppResult<Vec<SegmentView>> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        if self
+            .link_context()?
+            .pending_notes
+            .iter()
+            .any(|pending| pending == id)
+        {
+            return Err(AppError::store(
+                "E_PENDING_NOTE",
+                "请先在番茄联动面板确认备注，再拆分记录",
+            ));
+        }
         let at = self.clock.now();
         let segment = self
             .store
@@ -539,6 +552,17 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
     /// `segment_merge`：合并连续段，中间空档一并覆盖；返回合并后的段。
     pub fn merge_segments(&self, ids: &[String]) -> AppResult<SegmentView> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        if self
+            .link_context()?
+            .pending_notes
+            .iter()
+            .any(|pending| ids.contains(pending))
+        {
+            return Err(AppError::store(
+                "E_PENDING_NOTE",
+                "请先在番茄联动面板确认备注，再合并记录",
+            ));
+        }
         let at = self.clock.now();
         let mut segments = Vec::with_capacity(ids.len());
         for id in ids {

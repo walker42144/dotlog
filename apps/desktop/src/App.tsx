@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { AiAssistantPage } from "./components/AiAssistantPage";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PluginPage } from "./components/PluginPage";
 import { localPlugins, PLUGINS_CHANGED, type LocalPlugin } from "./lib/plugins";
 import { CommandPalette } from "./components/CommandPalette";
@@ -19,9 +20,10 @@ import { Toast, type ToastAction } from "./components/Toast";
 import { useDay } from "./hooks/useDay";
 import { useTimer } from "./hooks/useTimer";
 import { configureDayStart, dayKeyOf, parseDayKey, formatDateHeading, formatDuration } from "./lib/format";
-import { ipc, friendlyMessage, type SegmentView } from "./lib/ipc";
+import { ipc, friendlyMessage, toIpcError, type SegmentView } from "./lib/ipc";
 
-type Theme = "light" | "dark";
+import { resolveTheme, themeMode, themePreference as parseThemePreference, type Theme } from "./lib/themes";
+import { pluginNavigation } from "./lib/plugin-navigation";
 
 interface ToastState {
   message: string;
@@ -30,7 +32,7 @@ interface ToastState {
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(() =>
-    document.documentElement.dataset.theme === "dark" ? "dark" : "light"
+    resolveTheme(document.documentElement.dataset.theme, window.matchMedia("(prefers-color-scheme: dark)").matches)
   );
   const [page, setPage] = useState<PageKey>("today");
   const [externalPlugins,setExternalPlugins]=useState<LocalPlugin[]>([]);
@@ -39,8 +41,8 @@ export default function App() {
     let active=true;
     const load=()=>{ void Promise.all([localPlugins.list(),ipc.integrationList(),localPlugins.sidebar()]).then(([local,builtin,prefs])=>{
       if(!active)return;setExternalPlugins(local);
-      const nav=[...builtin.filter(p=>p.installed&&p.enabled&&(prefs?.[p.id]??p.id==="memos")).map(p=>({id:p.id,name:p.id==="memos"?"Memos":p.name})),...local.filter(p=>p.enabled&&p.showInSidebar).map(p=>({id:p.package.id,name:p.package.name}))];setPluginNav(nav);
-      setPage(current=>current.startsWith("plugin:")&&!builtin.some(p=>p.id===current.slice(7)&&p.installed&&p.enabled)&&!local.some(p=>p.package.id===current.slice(7)&&p.enabled)?"integrations":current==="memos"&&!builtin.some(p=>p.id==="memos"&&p.installed&&p.enabled)?"integrations":current);
+      setPluginNav(pluginNavigation(builtin, local, prefs ?? {}));
+      setPage(current=>current.startsWith("plugin:")&&!builtin.some(p=>p.id!=="tomatodo"&&p.id===current.slice(7)&&p.installed&&p.enabled)&&!local.some(p=>p.package.id===current.slice(7)&&p.enabled)?"integrations":current==="memos"&&!builtin.some(p=>p.id==="memos"&&p.installed&&p.enabled)?"integrations":current);
     }).catch(()=>{if(active)setPluginNav([]);});};
     const open=(e:Event)=>{const id=(e as CustomEvent<string>).detail;if(typeof id==="string")setPage(`plugin:${id}`);};
     load();window.addEventListener(PLUGINS_CHANGED,load);window.addEventListener("dotlog:settings-changed",load);window.addEventListener("dotlog:open-plugin",open);
@@ -52,7 +54,25 @@ export default function App() {
   const timer = useTimer();
   const day = useDay(timer.dayVersion);
   const [clockTick, setClockTick] = useState(0);
-  const [themePreference, setThemePreference] = useState("system");
+  const [themePreference, setThemePreference] = useState(() => {
+    try { return parseThemePreference(localStorage.getItem("dotlog.theme")); } catch { return "system"; }
+  });
+  const mainRef = useRef<HTMLElement>(null);
+  const [motion, setMotion] = useState(() => document.documentElement.dataset.motion === "reduced" ? "reduced" : "system");
+  useEffect(() => {
+    document.documentElement.dataset.motion = motion;
+    try { localStorage.setItem("dotlog.motion", motion); } catch { /* Optional startup cache. */ }
+  }, [motion]);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let animation: Animation | undefined;
+    if (motion !== "reduced" && !media.matches) {
+      animation = mainRef.current?.animate([{ opacity: 0.65 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
+    }
+    const cancel = () => animation?.cancel();
+    media.addEventListener("change", cancel);
+    return () => { cancel(); media.removeEventListener("change", cancel); };
+  }, [page, motion]);
   const dates = formatDateHeading(parseDayKey(day.day?.date ?? dayKeyOf(Date.now())));
   useEffect(() => {
     const id = window.setInterval(() => setClockTick((v) => v + 1), 15_000);
@@ -64,11 +84,11 @@ export default function App() {
       if (!active) return;
       configureDayStart(Number(settings["day.start_minutes"] ?? 240));
       setClockTick((v) => v + 1);
-      const preference = String(settings["ui.theme"] ?? "system");
+      setMotion(settings["ui.motion"] === "reduced" ? "reduced" : "system");
+      const preference = parseThemePreference(settings["ui.theme"]);
       setThemePreference(preference);
-      const dark = preference === "dark" || (preference === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-      setTheme(dark ? "dark" : "light");
-    }); };
+      setTheme(resolveTheme(preference, window.matchMedia("(prefers-color-scheme: dark)").matches));
+    }).catch((error: unknown) => notify(friendlyMessage(toIpcError(error)), "error")); };
     load(); window.addEventListener("dotlog:settings-changed", load);
     return () => { active = false; window.removeEventListener("dotlog:settings-changed", load); };
   }, []);
@@ -122,11 +142,14 @@ export default function App() {
 
   const toggleTheme = useCallback(
     () => {
-      const next = theme === "dark" ? "light" : "dark";
+      const next = themeMode(theme) === "dark" ? "light" : "dark";
       setTheme(next); setThemePreference(next);
-      void ipc.settingsPatch("app", [{ key: "ui.theme", value: next }]).then(() => window.dispatchEvent(new Event("dotlog:settings-changed")));
+      void ipc.settingsPatch("app", [{ key: "ui.theme", value: next }]).then(() => window.dispatchEvent(new Event("dotlog:settings-changed"))).catch((error: unknown) => {
+        setTheme(theme); setThemePreference(themePreference);
+        notify(friendlyMessage(toIpcError(error)), "error");
+      });
     },
-    [theme]
+    [theme, themePreference, notify]
   );
 
   const openSegmentEditor = useCallback((segment: SegmentView, next: SegmentView | null) => {
@@ -175,14 +198,14 @@ export default function App() {
         dateLabel={dates.compact}
         statusLabel={statusLabel}
         statusTone={recording ? "recording" : state?.paused ? "paused" : "idle"}
-        theme={theme}
+        theme={themeMode(theme)}
         onToggleTheme={toggleTheme}
       />
 
       <div className={`app-body${page === "today" ? "" : " app-body--plain"}`}>
         <SideNav page={page} onSelect={setPage} plugins={pluginNav} />
 
-        <main className="app-main">
+        <main className="app-main" ref={mainRef}>
           {page === "today" && (
             <>
               <header className="page-head">
@@ -240,10 +263,10 @@ export default function App() {
             />
           )}
 
-          {page.startsWith("plugin:") && (["ai","tomatodo"].includes(page.slice(7)) ? <IntegrationsPage key={page} focusPlugin={page.slice(7)} onNotify={notify} onDataChanged={timer.refresh}/> : externalPlugins.find(p=>p.package.id===page.slice(7)) ? <PluginPage key={page} plugin={externalPlugins.find(p=>p.package.id===page.slice(7))!}/> : <p>插件未安装或不可用</p>)}
+          {page.startsWith("plugin:") && (page === "plugin:ai" ? <AiAssistantPage onNotify={notify} onDataChanged={timer.refresh}/> : externalPlugins.find(p=>p.package.id===page.slice(7)&&p.enabled) ? <PluginPage key={page} plugin={externalPlugins.find(p=>p.package.id===page.slice(7))!}/> : <p>插件未安装或未启用，请在插件管理中检查。</p>)}
+
           {page === "settings" && (
             <SettingsPage
-              onThemeChange={setTheme}
               onNotify={notify}
               onDataChanged={timer.refresh}
             />

@@ -530,6 +530,18 @@ pub fn runtime_get(conn: &Connection, key: &str) -> StorageResult<Option<String>
         .optional()?)
 }
 
+pub fn link_note_pending(conn: &Connection, id: &str) -> StorageResult<bool> {
+    let Some(raw) = runtime_get(conn, "tomatodo.link.v1")? else {
+        return Ok(false);
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|_| StorageError::Db(rusqlite::Error::InvalidQuery))?;
+    Ok(value
+        .get("pending_notes")
+        .and_then(|v| v.as_array())
+        .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(id))))
+}
+
 /// 运行时状态 upsert。
 pub fn runtime_set(conn: &Connection, key: &str, value: &str, now_ms: i64) -> StorageResult<()> {
     conn.execute(
@@ -1016,14 +1028,29 @@ fn update_sessions(
         if let Effect::InsertTimePoint(point) = effect {
             if let Some(id) = &point.segment_id {
                 if matches!(point.kind, PointKind::Finish | PointKind::Punch) {
-                    let prompt = setting_rows(conn, "app")?
-                        .into_iter()
-                        .find(|(k, _)| k == "notify.on_punch")
-                        .map(|(_, v)| v != "false")
-                        .unwrap_or(true);
+                    let link_note_pending = point
+                        .payload
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                        .and_then(|value| value.get("awaitNote").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    let prompt = link_note_pending
+                        || setting_rows(conn, "app")?
+                            .into_iter()
+                            .find(|(k, _)| k == "notify.on_punch")
+                            .map(|(_, v)| v != "false")
+                            .unwrap_or(true);
                     conn.execute("UPDATE record_session SET publish_ready=?2 WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",params![id,i64::from(!prompt)])?;
                 } else if point.kind == PointKind::Edit {
-                    conn.execute("UPDATE record_session SET publish_ready=1 WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",[id])?;
+                    let confirmed = point
+                        .payload
+                        .as_deref()
+                        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                        .and_then(|v| v.get("tomatodoNoteConfirmed").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    if confirmed || !link_note_pending(conn, id)? {
+                        conn.execute("UPDATE record_session SET publish_ready=1 WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",[id])?;
+                    }
                 }
             }
         }

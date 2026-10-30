@@ -1,0 +1,9 @@
+{
+  "id": "local-tomatodo-link",
+  "name": "番茄联动",
+  "version": "0.4.0",
+  "apiVersion": 1,
+  "author": "DotLog",
+  "description": "实时分段、补记和历史导入。可独立安装、停用或移除。",
+  "permissions": ["tomatodo:link", "tomatodo:history"]
+}
