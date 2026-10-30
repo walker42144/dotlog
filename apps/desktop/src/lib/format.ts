@@ -47,7 +47,10 @@ export function toLocalInput(epochMs: number): string {
 }
 
 /** 逻辑日起点（与 domain DEFAULT_DAY_START_MINUTES 对齐：凌晨 4 点）。 */
-export const DAY_START_MINUTES = 240;
+export let DAY_START_MINUTES = 240;
+export function configureDayStart(value: number): void {
+  if (Number.isInteger(value) && value >= 0 && value < 1440) DAY_START_MINUTES = value;
+}
 
 /** 某个日历日所属逻辑日的毫秒窗口：[当日 04:00, 次日 04:00)。 */
 export function dayWindowOf(date: Date): { from: number; to: number } {

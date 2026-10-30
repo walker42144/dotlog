@@ -85,7 +85,7 @@ export function AnalysisPage({ dayVersion }: AnalysisPageProps) {
   const [selected, setSelected] = useState<number | null>(null);
   const [drill, setDrill] = useState<SegmentView[] | null>(null);
 
-  const range = useMemo(() => rangeOf(granularity, count), [granularity, count]);
+  const range = useMemo(() => rangeOf(granularity, count), [granularity, count, dayVersion]);
 
   useEffect(() => {
     ipc

@@ -52,10 +52,22 @@ impl SegmentView {
             },
             // 分类由调用方按 id 关联（`with_category`）；标签在 M4 接入。
             category: None,
-            tags: Vec::new(),
+            tags: segment
+                .tags
+                .iter()
+                .map(|name| TagView {
+                    id: name.clone(),
+                    name: name.clone(),
+                    color: None,
+                })
+                .collect(),
             is_focus: segment.is_focus,
             is_ignored: segment.is_ignored,
-            status: if segment.is_active() { "active" } else { "closed" },
+            status: if segment.is_active() {
+                "active"
+            } else {
+                "closed"
+            },
             source: "manual",
             revision: segment.revision,
         }
@@ -85,6 +97,7 @@ pub struct TimerStateView {
     pub phase: Phase,
     pub active: Option<SegmentView>,
     pub elapsed_seconds: i64,
+    pub session_started_at: Option<i64>,
     pub mode: PunchMode,
     pub paused: bool,
 }
@@ -176,7 +189,9 @@ pub struct SegmentPatch {
     /// 新终点（epoch ms）；active 段不可设终点。
     pub end_at: Option<i64>,
     /// 双层 `Option`：缺省 = 不修改，`null` = 清空分类。
+    #[serde(default, deserialize_with = "nullable_category")]
     pub category_id: Option<Option<String>>,
+    pub tags: Option<Vec<String>>,
     pub is_focus: Option<bool>,
     pub is_ignored: Option<bool>,
 }
@@ -366,4 +381,10 @@ pub(crate) fn pending_note(segment: &Segment) -> Option<PendingNoteView> {
         start_at: segment.start_at_ms,
         end_at: segment.end_at_ms?,
     })
+}
+
+fn nullable_category<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }

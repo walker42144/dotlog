@@ -1,19 +1,25 @@
 {
   "name": "@dotlog/desktop",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.17",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:ui": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",
+    "katex": "^0.19.1",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.0",

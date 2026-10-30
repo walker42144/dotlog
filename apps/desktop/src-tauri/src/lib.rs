@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 mod backup;
 mod diagnostics;
 mod integrations;
+mod local_plugins;
 mod log;
+mod tomatodo_link;
+mod tomatodo_observer;
 use backup::BackupEntry;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -27,8 +30,6 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 
 /// 前端订阅的快捷事件：托盘「打点」与全局快捷键共用，由前端按当前状态决定开始还是打点。
 const QUICK_PUNCH_EVENT: &str = "dotlog://quick-punch";
-/// 托盘「暂停」；仅在记录中且未暂停时生效。
-const QUICK_PAUSE_EVENT: &str = "dotlog://quick-pause";
 /// 启动检测到异常时通知前端（前端也会主动调用 `recovery_get` 兜底）。
 const RECOVERY_EVENT: &str = "recovery://required";
 const HOTKEY_MODIFIERS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT);
@@ -55,6 +56,7 @@ struct RecoveryCache {
 }
 
 struct AppState {
+    link: tomatodo_link::Runtime,
     timer: Arc<TimerService<Database, SystemClock>>,
     /// 与 timer 共享同一连接的仓储句柄：插件宿主与 outbox 查询用。
     store: Arc<dyn TimerStore>,
@@ -111,6 +113,15 @@ fn fs_error(error: std::io::Error) -> IpcError {
 }
 
 fn app_dir() -> PathBuf {
+    if option_env!("DOTLOG_PREVIEW").is_some() {
+        if let Some(path) = std::env::var_os("DOTLOG_PROFILE_DIR") {
+            return PathBuf::from(path);
+        }
+        return std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ".".into())
+            .join("dotlog-preview");
+    }
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -150,9 +161,8 @@ fn retention(timer: &TimerService<Database, SystemClock>) -> (usize, usize, usiz
 /// 快照到 `backups/` 并执行保留清理；返回新文件信息。
 fn create_backup(timer: &TimerService<Database, SystemClock>) -> IpcResult<BackupEntry> {
     let dir = backup::backup_dir(&app_dir());
-    std::fs::create_dir_all(&dir).map_err(|error| {
-        store_error("E_BACKUP_FAILED", format!("无法创建备份目录：{error}"))
-    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| store_error("E_BACKUP_FAILED", format!("无法创建备份目录：{error}")))?;
     let path = backup::new_backup_path(&app_dir());
     timer.backup_to(&path).map_err(IpcError::from)?;
 
@@ -195,6 +205,91 @@ fn configured_shortcut(timer: &TimerService<Database, SystemClock>) -> Shortcut 
         .unwrap_or_else(|| Shortcut::new(Some(HOTKEY_MODIFIERS), HOTKEY_CODE))
 }
 
+fn ensure_ready(state: &AppState) -> IpcResult<()> {
+    let report = state.timer.check_session().map_err(IpcError::from)?;
+    if !report.integrity.quick_check_ok
+        || report.integrity.overlap_pairs > 0
+        || report.integrity.active_count > 1
+    {
+        return Err(store_error(
+            "E_DB_CORRUPT",
+            "记录完整性检查未通过，请先备份并修复数据".into(),
+        ));
+    }
+    if report.recovery.required {
+        let mut cache = state.recovery.lock().map_err(|_| cache_error())?;
+        if !cache.info.required {
+            cache.info = report.recovery;
+            cache.cutoff_ms = report.cutoff_ms;
+        }
+    }
+    if state
+        .recovery
+        .lock()
+        .map_err(|_| cache_error())?
+        .info
+        .required
+    {
+        return Err(store_error(
+            "E_RECOVERY_REQUIRED",
+            "请先处理计时恢复提示".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn quick_action(app: &AppHandle, pause: bool, source: PointSource) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if ensure_ready(&state).is_err() {
+        show_main_window(app);
+        return;
+    }
+    let result: IpcResult<Option<PunchResultView>> = (|| {
+        let current = state.timer.get_state().map_err(IpcError::from)?;
+        if tomatodo_link::enabled(&state) {
+            if current.active.is_some() {
+                return tomatodo_link::manual_end(&state).map(Some);
+            }
+            if !pause {
+                tomatodo_link::manual_start(&state)?;
+            }
+            return Ok(None);
+        }
+        if current.active.is_some() {
+            let result = if pause {
+                state.timer.pause(source)
+            } else {
+                state.timer.punch(source)
+            }
+            .map_err(IpcError::from)?;
+            if !pause {
+                integrations::dispatch_closed(
+                    &state,
+                    &result.closed_segment.id,
+                    CloseReason::Punch,
+                );
+            }
+            Ok(Some(result))
+        } else if pause {
+            Ok(None)
+        } else {
+            state.timer.start(source).map_err(IpcError::from)?;
+            Ok(None)
+        }
+    })();
+    match result {
+        Ok(payload) => {
+            let _ = app.emit(QUICK_PUNCH_EVENT, payload);
+        }
+        Err(error) => {
+            log::write(&app_dir(), "WARN", &error.message);
+            show_main_window(app);
+        }
+    }
+}
+
 fn source_or_button(source: Option<PointSource>) -> PointSource {
     source.unwrap_or(PointSource::Button)
 }
@@ -218,6 +313,11 @@ fn timer_start(
     state: tauri::State<'_, AppState>,
     source: Option<PointSource>,
 ) -> IpcResult<TimerStateView> {
+    ensure_ready(state.inner())?;
+    if tomatodo_link::enabled(&state) {
+        tomatodo_link::manual_start(&state)?;
+        return state.timer.get_state().map_err(IpcError::from);
+    }
     state
         .timer
         .start(source_or_button(source))
@@ -229,6 +329,10 @@ fn timer_punch(
     state: tauri::State<'_, AppState>,
     source: Option<PointSource>,
 ) -> IpcResult<PunchResultView> {
+    ensure_ready(state.inner())?;
+    if tomatodo_link::enabled(&state) {
+        return tomatodo_link::manual_end(&state);
+    }
     let result = state
         .timer
         .punch(source_or_button(source))
@@ -242,10 +346,16 @@ fn timer_pause(
     state: tauri::State<'_, AppState>,
     source: Option<PointSource>,
 ) -> IpcResult<PunchResultView> {
-    state
+    ensure_ready(state.inner())?;
+    if tomatodo_link::enabled(&state) {
+        return tomatodo_link::manual_end(&state);
+    }
+    let result = state
         .timer
         .pause(source_or_button(source))
-        .map_err(IpcError::from)
+        .map_err(IpcError::from)?;
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -253,16 +363,31 @@ fn timer_finish(
     state: tauri::State<'_, AppState>,
     source: Option<PointSource>,
 ) -> IpcResult<PunchResultView> {
+    ensure_ready(state.inner())?;
+    if tomatodo_link::enabled(&state) {
+        return tomatodo_link::manual_end(&state);
+    }
     let result = state
         .timer
         .finish(source_or_button(source))
         .map_err(IpcError::from)?;
-    integrations::dispatch_closed(state.inner(), &result.closed_segment.id, CloseReason::Finish);
+    integrations::dispatch_closed(
+        state.inner(),
+        &result.closed_segment.id,
+        CloseReason::Finish,
+    );
     Ok(result)
 }
 
 #[tauri::command]
 fn timer_undo(state: tauri::State<'_, AppState>) -> IpcResult<UndoResultView> {
+    if tomatodo_link::enabled(&state) {
+        return Err(store_error(
+            "E_TOMATODO_LINK",
+            "联动期间请在插件面板核对分段，暂不支持撤销".into(),
+        ));
+    }
+    ensure_ready(state.inner())?;
     state.timer.undo().map_err(IpcError::from)
 }
 
@@ -277,12 +402,39 @@ fn day_get(state: tauri::State<'_, AppState>, date: String) -> IpcResult<DayView
 }
 
 #[tauri::command]
+fn pending_note_get(state: tauri::State<'_, AppState>) -> IpcResult<Option<SegmentView>> {
+    state.timer.pending_note().map_err(IpcError::from)
+}
+#[tauri::command]
+fn segment_confirm(state: tauri::State<'_, AppState>, id: String) -> IpcResult<()> {
+    state.timer.confirm_session(&id).map_err(IpcError::from)
+}
+
+#[tauri::command]
+fn segment_get(state: tauri::State<'_, AppState>, id: String) -> IpcResult<SegmentView> {
+    let segment = state
+        .store
+        .find_segment(&id)
+        .map_err(IpcError::from)?
+        .ok_or_else(|| store_error("E_SEGMENT_NOT_FOUND", "记录不存在".into()))?;
+    let mut view = SegmentView::from_segment(&segment, chrono::Local::now().timestamp_millis());
+    view.category = state
+        .timer
+        .categories()
+        .map_err(IpcError::from)?
+        .into_iter()
+        .find(|c| Some(&c.id) == segment.category_id.as_ref());
+    Ok(view)
+}
+
+#[tauri::command]
 fn segment_update(
     state: tauri::State<'_, AppState>,
     id: String,
     revision: u32,
     patch: SegmentPatch,
 ) -> IpcResult<SegmentView> {
+    ensure_ready(state.inner())?;
     state
         .timer
         .update_segment(&id, revision, patch)
@@ -294,7 +446,11 @@ fn segment_backfill(
     state: tauri::State<'_, AppState>,
     input: BackfillInput,
 ) -> IpcResult<SegmentView> {
-    let view = state.timer.backfill_segment(input).map_err(IpcError::from)?;
+    ensure_ready(state.inner())?;
+    let view = state
+        .timer
+        .backfill_segment(input)
+        .map_err(IpcError::from)?;
     // 补记生成的是已关闭段，同样进入插件事件流。
     integrations::dispatch_closed(state.inner(), &view.id, CloseReason::Punch);
     Ok(view)
@@ -302,6 +458,7 @@ fn segment_backfill(
 
 #[tauri::command]
 fn segment_delete(state: tauri::State<'_, AppState>, id: String) -> IpcResult<()> {
+    ensure_ready(state.inner())?;
     state.timer.delete_segment(&id).map_err(IpcError::from)
 }
 
@@ -311,11 +468,13 @@ fn segment_split(
     id: String,
     at: i64,
 ) -> IpcResult<Vec<SegmentView>> {
+    ensure_ready(state.inner())?;
     state.timer.split_segment(&id, at).map_err(IpcError::from)
 }
 
 #[tauri::command]
 fn segment_merge(state: tauri::State<'_, AppState>, ids: Vec<String>) -> IpcResult<SegmentView> {
+    ensure_ready(state.inner())?;
     state.timer.merge_segments(&ids).map_err(IpcError::from)
 }
 
@@ -450,6 +609,7 @@ fn import_commit(
     state: tauri::State<'_, AppState>,
     content: String,
 ) -> IpcResult<ImportResultView> {
+    ensure_ready(state.inner())?;
     state.timer.import_commit(&content).map_err(IpcError::from)
 }
 
@@ -465,10 +625,32 @@ fn backup_list() -> IpcResult<Vec<BackupEntry>> {
 
 #[tauri::command]
 fn backup_restore(state: tauri::State<'_, AppState>, path: String) -> IpcResult<()> {
+    let _link = state.link.gate.lock().map_err(|_| cache_error())?;
+    if tomatodo_link::enabled(&state) {
+        return Err(store_error(
+            "E_TOMATODO_LINK",
+            "请先停用番茄联动再恢复备份".into(),
+        ));
+    }
+    let _lifecycle = state.host.lifecycle.lock().map_err(|_| cache_error())?;
+    // Safety copies are not subject to rolling retention cleanup.
+    let safe_dir = app_dir().join("restore-safety");
+    std::fs::create_dir_all(&safe_dir).map_err(fs_error)?;
+    let safety = safe_dir.join(format!("before-restore-{}.db", uuid_stamp()));
+    state.timer.backup_to(&safety).map_err(IpcError::from)?;
     state
         .timer
         .restore_from(Path::new(&path))
-        .map_err(IpcError::from)
+        .map_err(IpcError::from)?;
+    let report = state.timer.begin_session().map_err(IpcError::from)?;
+    let mut cache = state.recovery.lock().map_err(|_| cache_error())?;
+    cache.info = report.recovery;
+    cache.cutoff_ms = report.cutoff_ms;
+    Ok(())
+}
+
+fn uuid_stamp() -> String {
+    dotlog_application::new_id()
 }
 
 fn cache_error() -> IpcError {
@@ -521,17 +703,30 @@ fn diagnostics_snapshot(state: tauri::State<'_, AppState>) -> IpcResult<Diagnost
     let view = state.timer.diagnostics().map_err(IpcError::from)?;
     let root = app_dir();
     let tail = log::recent_lines(&root, 200);
-    let path = diagnostics::write_snapshot(&root, view, tail).map_err(|error| {
-        store_error("E_UNKNOWN", format!("诊断包写入失败：{error}"))
-    })?;
-    log::write(
-        &root,
-        "INFO",
-        &format!("诊断包已生成：{}", path.display()),
-    );
+    let path = diagnostics::write_snapshot(&root, view, tail)
+        .map_err(|error| store_error("E_UNKNOWN", format!("诊断包写入失败：{error}")))?;
+    log::write(&root, "INFO", &format!("诊断包已生成：{}", path.display()));
     Ok(DiagnosticsResult {
         path: path.display().to_string(),
     })
+}
+
+#[tauri::command]
+fn data_open_folder(kind: String) -> IpcResult<()> {
+    let path = match kind.as_str() {
+        "backups" => backup::backup_dir(&app_dir()),
+        "exports" => exports_dir(),
+        "restore-safety" => app_dir().join("restore-safety"),
+        "data" => app_dir(),
+        _ => return Err(store_error("E_SETTING_INVALID", "目录类型无效".into())),
+    };
+    std::fs::create_dir_all(&path).map_err(fs_error)?;
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map_err(fs_error)?;
+    Ok(())
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
@@ -573,10 +768,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             match id {
                 "show" => show_main_window(app),
                 "punch" => {
-                    let _ = app.emit(QUICK_PUNCH_EVENT, "tray");
+                    quick_action(app, false, PointSource::Tray);
                 }
                 "pause" => {
-                    let _ = app.emit(QUICK_PAUSE_EVENT, ());
+                    quick_action(app, true, PointSource::Tray);
                 }
                 "autostart" => {
                     let manager = app.autolaunch();
@@ -594,11 +789,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                     QUITTING.store(true, Ordering::SeqCst);
                     if let Some(state) = app.try_state::<AppState>() {
                         if let Err(error) = state.timer.end_session() {
-                            log::write(
-                                &app_dir(),
-                                "WARN",
-                                &format!("退出标记写入失败：{error}"),
-                            );
+                            log::write(&app_dir(), "WARN", &format!("退出标记写入失败：{error}"));
                         }
                     }
                     app.exit(0);
@@ -646,7 +837,7 @@ pub fn run() {
                 .with_handler(|app, _shortcut, event| {
                     // 只注册一个快捷键，按键按下即触发打点事件。
                     if event.state() == ShortcutState::Pressed {
-                        let _ = app.emit(QUICK_PUNCH_EVENT, "hotkey");
+                        quick_action(app, false, PointSource::Hotkey);
                     }
                 })
                 .build(),
@@ -698,6 +889,7 @@ pub fn run() {
             let punch_shortcut = configured_shortcut(&timer);
             let notify_recovery = recovery_info.clone();
             app.manage(AppState {
+                link: tomatodo_link::Runtime::default(),
                 timer: Arc::clone(&timer),
                 store: Arc::clone(&store),
                 host: Arc::clone(&host),
@@ -712,12 +904,29 @@ pub fn run() {
 
             // outbox worker：先补发一次（应用关闭期间到期的任务），再按 30 s 轮询。
             integrations::spawn_worker(host, app.handle().clone());
+            tomatodo_link::spawn_worker(app.handle().clone());
 
             // 心跳：每 30 秒一次，用于下次启动检测休眠与长间隔。
             let heartbeat = Arc::clone(&timer);
             let heartbeat_root = root.clone();
+            let heartbeat_app = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(30));
+                if let Some(state) = heartbeat_app.try_state::<AppState>() {
+                    let mut cache = match state.recovery.lock() { Ok(c) => c, Err(_) => continue };
+                    if cache.info.required { continue; }
+                    match heartbeat.check_session() {
+                        Ok(report) if report.recovery.required => {
+                            cache.info = report.recovery;
+                            cache.cutoff_ms = report.cutoff_ms;
+                            let _ = heartbeat_app.emit(RECOVERY_EVENT, &cache.info);
+                            continue;
+                        }
+                        Err(error) => { log::write(&heartbeat_root, "ERROR", &format!("运行时核对失败：{error}")); continue; }
+                        _ => {}
+                    }
+                }
+                backup_on_startup(&heartbeat);
                 if let Err(error) = heartbeat.record_heartbeat() {
                     log::write(&heartbeat_root, "WARN", &format!("心跳写入失败：{error}"));
                 }
@@ -747,6 +956,9 @@ pub fn run() {
             timer_undo,
             day_today,
             day_get,
+            pending_note_get,
+            segment_confirm,
+            segment_get,
             segment_update,
             segment_backfill,
             segment_delete,
@@ -761,25 +973,34 @@ pub fn run() {
             export_data,
             import_preview,
             import_commit,
+            data_open_folder,
             backup_now,
             backup_list,
             backup_restore,
             recovery_get,
             recovery_resolve,
             diagnostics_snapshot,
+            local_plugins::local_plugin_list,
+            local_plugins::local_plugin_install,
+            local_plugins::local_plugin_change,
+            local_plugins::local_plugin_rpc,
+            local_plugins::plugin_sidebar_get,
+            local_plugins::plugin_sidebar_set,
             integrations::integration_list,
             integrations::integration_set_enabled,
+            integrations::integration_set_installed,
+            integrations::memos_browse,
+            integrations::memos_save,
+            integrations::memos_delete,
             integrations::integration_config_set,
             integrations::integration_secret_set,
             integrations::integration_test,
             integrations::outbox_list,
             integrations::outbox_retry,
             integrations::ai_suggest,
+            integrations::ai_review,
+            integrations::ai_models,
             integrations::ai_apply,
-            integrations::tomatodo_scan,
-            integrations::tomatodo_import,
-            integrations::tomatodo_compare,
-            integrations::tomatodo_analyze
         ])
         .run(tauri::generate_context!())
         .expect("DotLog 启动失败");

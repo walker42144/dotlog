@@ -7,8 +7,9 @@
 //!   `segment_update` 落库，本 crate 不接触数据库。
 
 pub mod provider;
+pub mod review;
 
-use dotlog_plugin_sdk::{API_VERSION, Capability, Plugin, PluginManifest};
+use dotlog_plugin_sdk::{Capability, Plugin, PluginManifest, API_VERSION};
 use serde_json::json;
 
 pub use provider::{

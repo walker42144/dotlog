@@ -47,6 +47,7 @@ impl HttpClient for UreqClient {
 
         let timeout = request.timeout_ms.min(self.timeout_ms).max(1);
         let agent = ureq::AgentBuilder::new()
+            .redirects(0)
             .timeout(Duration::from_millis(timeout))
             .build();
         let method = request.method.to_ascii_uppercase();
@@ -67,14 +68,22 @@ impl HttpClient for UreqClient {
         };
 
         let status = response.status();
-        let mut body = Vec::new();
-        response
-            .into_reader()
-            .take(4 * 1024 * 1024)
-            .read_to_end(&mut body)
-            .map_err(|error| PluginError::Network(format!("读取响应失败：{error}")))?;
+        let body = read_body(response.into_reader())?;
         Ok(HttpResponse { status, body })
     }
+}
+
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+fn read_body(reader: impl Read) -> Result<Vec<u8>, PluginError> {
+    let mut body = Vec::new();
+    reader
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| PluginError::Network(format!("读取响应失败：{error}")))?;
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(PluginError::Network("响应超过 4MB，请缩小查询范围".into()));
+    }
+    Ok(body)
 }
 
 /// 系统钥匙串实现；命名空间 `dotlog.<pluginId>`，键名即服务内条目（§3）。
@@ -125,10 +134,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn response_limit_rejects_truncation_and_accepts_exact_boundary() {
+        assert_eq!(
+            read_body(std::io::repeat(0).take(MAX_RESPONSE_BYTES))
+                .unwrap()
+                .len() as u64,
+            MAX_RESPONSE_BYTES
+        );
+        assert!(read_body(std::io::repeat(0).take(MAX_RESPONSE_BYTES + 1)).is_err());
+        assert_eq!(read_body(&b"small"[..]).unwrap(), b"small");
+    }
+
+    #[test]
     fn host_of_parses_userinfo_port_and_case() {
-        assert_eq!(host_of("https://memos.example.com/api/v1/status").as_deref(), Some("memos.example.com"));
-        assert_eq!(host_of("http://user:pass@192.168.1.5:5230/memos").as_deref(), Some("192.168.1.5"));
-        assert_eq!(host_of("HTTPS://Example.COM:443/x").as_deref(), Some("example.com"));
+        assert_eq!(
+            host_of("https://memos.example.com/api/v1/status").as_deref(),
+            Some("memos.example.com")
+        );
+        assert_eq!(
+            host_of("http://user:pass@192.168.1.5:5230/memos").as_deref(),
+            Some("192.168.1.5")
+        );
+        assert_eq!(
+            host_of("HTTPS://Example.COM:443/x").as_deref(),
+            Some("example.com")
+        );
         assert_eq!(host_of("http://[::1]:5230/").as_deref(), Some("::1"));
         assert_eq!(host_of("not-a-url"), None);
         assert_eq!(host_of("https:///path"), None);

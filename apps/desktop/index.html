@@ -5,30 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>打点 DotLog</title>
-    <script>
-      (function () {
-        var stored = null;
-        try {
-          stored = localStorage.getItem("dotlog.theme");
-        } catch (e) {
-          stored = null;
-        }
-        var theme =
-          stored === "light" || stored === "dark"
-            ? stored
-            : window.matchMedia("(prefers-color-scheme: dark)").matches
-              ? "dark"
-              : "light";
-        document.documentElement.dataset.theme = theme;
-      })();
-    </script>
+    <script src="/theme-init.js"></script>
     <style>
       html {
-        background: #fafafa;
+        background: #f6f7f9;
       }
       html[data-theme="dark"] {
-        background: #0b0f0e;
+        background: #181c22;
       }
+      html[data-theme="forest"] { background: #101911; }
+      html[data-theme="ocean"] { background: #0d1625; }
+      html[data-theme="paper"] { background: #f7f1e7; }
+      html[data-theme="lavender"] { background: #f6f3fb; }
+      html[data-theme="rose"] { background: #fcf3f4; }
+      html[data-theme="grid"] { background: #f2f6f0; }
+      html[data-theme="folio"] { background: #e9eaf0; }
+      html[data-theme="console"] { background: #202326; }
+      html[data-theme="glass"] { background: #edf5f8; }
     </style>
   </head>
   <body>

@@ -1,6 +1,4 @@
-use dotlog_application::{
-    CategoryRow, IntegrationLinkRow, IntegrityReport, OutboxRecord,
-};
+use dotlog_application::{CategoryRow, IntegrationLinkRow, IntegrityReport, OutboxRecord};
 use dotlog_domain::{Effect, PointKind, PointSource, Segment, TimePoint};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -12,7 +10,11 @@ const SEGMENT_COLUMNS: &str = "id, start_at_ms, end_at_ms, start_tz_offset_min, 
 /// 当前唯一的 active 段（由 `ux_segment_single_active` 保证至多一条）。
 pub fn find_active_segment(conn: &Connection) -> StorageResult<Option<Segment>> {
     let sql = format!("SELECT {SEGMENT_COLUMNS} FROM time_segment WHERE status = 'active' LIMIT 1");
-    Ok(conn.query_row(&sql, [], map_segment).optional()?)
+    let mut segment = conn.query_row(&sql, [], map_segment).optional()?;
+    if let Some(s) = &mut segment {
+        s.tags = segment_tags(conn, &s.id)?;
+    }
+    Ok(segment)
 }
 
 /// 与 `[from_ms, to_ms)` 相交的非删除段，按开始时间升序。
@@ -28,14 +30,22 @@ pub fn segments_overlapping(
     );
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params![from_ms, to_ms], map_segment)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut segments: Vec<Segment> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for segment in &mut segments {
+        segment.tags = segment_tags(conn, &segment.id)?;
+    }
+    Ok(segments)
 }
 
 /// 按 id 读取未删除的段。
 pub fn find_segment_by_id(conn: &Connection, id: &str) -> StorageResult<Option<Segment>> {
     let sql =
         format!("SELECT {SEGMENT_COLUMNS} FROM time_segment WHERE id = ?1 AND status <> 'deleted'");
-    Ok(conn.query_row(&sql, params![id], map_segment).optional()?)
+    let mut segment = conn.query_row(&sql, params![id], map_segment).optional()?;
+    if let Some(s) = &mut segment {
+        s.tags = segment_tags(conn, &s.id)?;
+    }
+    Ok(segment)
 }
 
 /// 最近一条未被撤销的事实。
@@ -51,7 +61,7 @@ pub struct PointRow {
 pub fn latest_point(conn: &Connection) -> StorageResult<Option<PointRow>> {
     let sql = "SELECT id, kind, occurred_at_ms, segment_id, payload FROM time_point
                WHERE undone_at_ms IS NULL
-               ORDER BY occurred_at_ms DESC, created_at_ms DESC
+               ORDER BY occurred_at_ms DESC, created_at_ms DESC, id DESC
                LIMIT 1";
     let raw = conn
         .query_row(sql, [], |row| {
@@ -94,7 +104,7 @@ pub fn last_point_kind(conn: &Connection) -> StorageResult<Option<PointKind>> {
         .query_row(
             "SELECT kind FROM time_point
              WHERE undone_at_ms IS NULL
-             ORDER BY occurred_at_ms DESC, created_at_ms DESC
+             ORDER BY occurred_at_ms DESC, created_at_ms DESC, id DESC
              LIMIT 1",
             [],
             |row| row.get(0),
@@ -134,6 +144,7 @@ pub fn insert_segment(conn: &Connection, segment: &Segment, now_ms: i64) -> Stor
             now_ms,
         ],
     )?;
+    write_segment_tags(conn, segment, now_ms)?;
     Ok(())
 }
 
@@ -149,7 +160,7 @@ pub fn update_segment(conn: &Connection, segment: &Segment, now_ms: i64) -> Stor
             start_at_ms = ?2, end_at_ms = ?3, start_tz_offset_min = ?4, end_tz_offset_min = ?5,
             title = ?6, note = ?7, category_id = ?8, is_focus = ?9, is_ignored = ?10,
             status = ?11, revision = ?12, updated_at_ms = ?13
-         WHERE id = ?1",
+         WHERE id = ?1 AND revision = ?12 - 1 AND status <> 'deleted'",
         params![
             segment.id,
             segment.start_at_ms,
@@ -167,8 +178,9 @@ pub fn update_segment(conn: &Connection, segment: &Segment, now_ms: i64) -> Stor
         ],
     )?;
     if changed == 0 {
-        return Err(StorageError::Db(rusqlite::Error::QueryReturnedNoRows));
+        return Err(StorageError::StaleRevision);
     }
+    write_segment_tags(conn, segment, now_ms)?;
     Ok(())
 }
 
@@ -200,7 +212,7 @@ pub fn restore_segment(conn: &Connection, segment: &Segment, now_ms: i64) -> Sto
         "UPDATE time_segment SET
             start_at_ms = ?2, end_at_ms = ?3, start_tz_offset_min = ?4, end_tz_offset_min = ?5,
             title = ?6, note = ?7, category_id = ?8, is_focus = ?9, is_ignored = ?10,
-            status = ?11, revision = ?12, deleted_at_ms = NULL, updated_at_ms = ?13
+            status = ?11, revision = MAX(revision + 1, ?12), deleted_at_ms = NULL, updated_at_ms = ?13
          WHERE id = ?1",
         params![
             segment.id,
@@ -221,6 +233,7 @@ pub fn restore_segment(conn: &Connection, segment: &Segment, now_ms: i64) -> Sto
     if changed == 0 {
         return Err(StorageError::Db(rusqlite::Error::QueryReturnedNoRows));
     }
+    write_segment_tags(conn, segment, now_ms)?;
     Ok(())
 }
 
@@ -234,7 +247,8 @@ pub fn history_segments(
     limit: i64,
     offset: i64,
 ) -> StorageResult<(Vec<Segment>, i64)> {
-    let where_clause = "status <> 'deleted' AND start_at_ms < ?2 AND (end_at_ms IS NULL OR end_at_ms > ?1)
+    let where_clause =
+        "status <> 'deleted' AND start_at_ms < ?2 AND (end_at_ms IS NULL OR end_at_ms > ?1)
         AND (?3 IS NULL OR title LIKE '%' || ?3 || '%' OR note LIKE '%' || ?3 || '%')";
     let total: i64 = conn.query_row(
         &format!("SELECT COUNT(*) FROM time_segment WHERE {where_clause}"),
@@ -247,7 +261,10 @@ pub fn history_segments(
     );
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params![from_ms, to_ms, text, limit, offset], map_segment)?;
-    let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for segment in &mut items {
+        segment.tags = segment_tags(conn, &segment.id)?;
+    }
     Ok((items, total))
 }
 
@@ -271,11 +288,27 @@ pub fn insert_time_point(conn: &Connection, point: &TimePoint) -> StorageResult<
 }
 
 /// 在同一个事务内按顺序应用领域层产出的变更集合。
-pub fn apply_effects(
-    conn: &Connection,
-    effects: &[Effect],
-    now_ms: i64,
-) -> StorageResult<()> {
+pub fn apply_effects(conn: &Connection, effects: &[Effect], now_ms: i64) -> StorageResult<()> {
+    let previous_session: Option<String> = conn.query_row("SELECT id FROM record_session WHERE status IN ('active','paused') ORDER BY updated_at_ms DESC,id DESC LIMIT 1", [], |r| r.get(0)).optional()?;
+    let undone = effects
+        .iter()
+        .find_map(|effect| {
+            if let Effect::MarkPointUndone { id, .. } = effect {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .map(|id| {
+            conn.query_row(
+                "SELECT kind,segment_id FROM time_point WHERE id=?1",
+                [id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+        })
+        .transpose()?
+        .flatten();
     for effect in effects {
         match effect {
             Effect::InsertSegment(segment) => insert_segment(conn, segment, now_ms)?,
@@ -286,6 +319,29 @@ pub fn apply_effects(
             Effect::MarkPointUndone { id, at_ms } => mark_point_undone(conn, id, *at_ms)?,
         }
     }
+    update_sessions(
+        conn,
+        effects,
+        previous_session.as_deref(),
+        undone.as_ref(),
+        now_ms,
+    )?;
+    for effect in effects {
+        if let Effect::InsertTimePoint(point) = effect {
+            if matches!(
+                point.kind,
+                PointKind::Punch | PointKind::Finish | PointKind::Backfill
+            ) {
+                if let Some(id) = point.segment_id.as_deref() {
+                    enqueue_memos_intent(conn, id, now_ms)?;
+                }
+            }
+        }
+    }
+    // Reopening/deleting a record cancels its unsent publication in the same transaction.
+    conn.execute("UPDATE outbox_event SET state='failed', last_error='记录已撤销或删除，已取消发布', next_retry_at_ms=NULL
+        WHERE type='memos.publish' AND state IN ('pending','inflight') AND json_extract(payload,'$.segmentId') IN
+        (SELECT id FROM time_segment WHERE status IN ('active','deleted'))", [])?;
     Ok(())
 }
 
@@ -455,7 +511,9 @@ pub const COUNTED_TABLES: &[&str] = &[
 pub fn table_counts(conn: &Connection) -> StorageResult<Vec<(String, i64)>> {
     let mut result = Vec::with_capacity(COUNTED_TABLES.len());
     for table in COUNTED_TABLES {
-        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))?;
+        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })?;
         result.push(((*table).to_string(), count));
     }
     Ok(result)
@@ -470,6 +528,18 @@ pub fn runtime_get(conn: &Connection, key: &str) -> StorageResult<Option<String>
             |row| row.get(0),
         )
         .optional()?)
+}
+
+pub fn link_note_pending(conn: &Connection, id: &str) -> StorageResult<bool> {
+    let Some(raw) = runtime_get(conn, "tomatodo.link.v1")? else {
+        return Ok(false);
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|_| StorageError::Db(rusqlite::Error::InvalidQuery))?;
+    Ok(value
+        .get("pending_notes")
+        .and_then(|v| v.as_array())
+        .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(id))))
 }
 
 /// 运行时状态 upsert。
@@ -515,7 +585,8 @@ pub fn outbox_take_due(
     limit: u32,
 ) -> StorageResult<Vec<OutboxRecord>> {
     let lease_until = now_ms + 5 * 60_000;
-    let sql = "UPDATE outbox_event SET state = 'inflight', next_retry_at_ms = ?1, updated_at_ms = ?2
+    let sql =
+        "UPDATE outbox_event SET state = 'inflight', next_retry_at_ms = ?1, updated_at_ms = ?2
                WHERE id IN (
                  SELECT id FROM outbox_event
                  WHERE (state = 'pending' AND (next_retry_at_ms IS NULL OR next_retry_at_ms <= ?2))
@@ -558,7 +629,12 @@ pub fn outbox_mark_retry(
 }
 
 /// 不可恢复失败：直接 `failed`，等待手动重试。
-pub fn outbox_mark_failed(conn: &Connection, id: &str, error: &str, now_ms: i64) -> StorageResult<()> {
+pub fn outbox_mark_failed(
+    conn: &Connection,
+    id: &str,
+    error: &str,
+    now_ms: i64,
+) -> StorageResult<()> {
     conn.execute(
         "UPDATE outbox_event SET state = 'failed', last_error = ?2, next_retry_at_ms = NULL,
            updated_at_ms = ?3 WHERE id = ?1",
@@ -577,8 +653,14 @@ pub fn outbox_list(
                        last_error, created_at_ms, updated_at_ms
                 FROM outbox_event";
     let (sql, has_filter) = match state {
-        Some(_) => (format!("{base} WHERE state = ?1 ORDER BY created_at_ms DESC LIMIT ?2"), true),
-        None => (format!("{base} ORDER BY created_at_ms DESC LIMIT ?1"), false),
+        Some(_) => (
+            format!("{base} WHERE state = ?1 ORDER BY created_at_ms DESC LIMIT ?2"),
+            true,
+        ),
+        None => (
+            format!("{base} ORDER BY created_at_ms DESC LIMIT ?1"),
+            false,
+        ),
     };
     let mut statement = conn.prepare(&sql)?;
     let map_rows = |row: &Row<'_>| map_outbox(row);
@@ -783,4 +865,204 @@ fn point_source_str(source: PointSource) -> &'static str {
         PointSource::SecondInstance | PointSource::Api | PointSource::System => "system",
         PointSource::Plugin => "plugin",
     }
+}
+
+fn enqueue_memos_intent(conn: &Connection, id: &str, now_ms: i64) -> StorageResult<()> {
+    let settings = setting_rows(conn, "plugin:memos")?;
+    let get = |key: &str| {
+        settings
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, raw)| serde_json::from_str::<serde_json::Value>(raw).ok())
+    };
+    if get("installed") == Some(serde_json::json!(false))
+        || get("enabled") != Some(serde_json::json!(true))
+    {
+        return Ok(());
+    }
+    let Some(segment) = find_segment_by_id(conn, id)? else {
+        return Ok(());
+    };
+    if segment.end_at_ms.is_none() {
+        return Ok(());
+    }
+    let auto = get("autoPublish");
+    let enabled = match auto.as_ref().and_then(|v| v.as_str()) {
+        Some("on_close") => true,
+        Some("tag_rule") => {
+            let rules = get("tagRules");
+            let rules = rules.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+            !segment.tags.is_empty()
+                && (rules.trim().is_empty()
+                    || segment
+                        .tags
+                        .iter()
+                        .any(|tag| rules.split(',').any(|r| r.trim().eq_ignore_ascii_case(tag))))
+        }
+        _ => false,
+    };
+    if !enabled {
+        return Ok(());
+    }
+    let payload =
+        serde_json::json!({"segmentId": id, "title": segment.title, "content": ""}).to_string();
+    outbox_enqueue(
+        conn,
+        Some(&format!("memos:{id}:publish")),
+        "memos.publish",
+        &payload,
+        now_ms,
+    )?;
+    conn.execute("UPDATE outbox_event SET state='pending',attempts=0,last_error=NULL,next_retry_at_ms=NULL,updated_at_ms=?2 WHERE dedupe_key=?1 AND state='failed' AND last_error='记录已撤销或删除，已取消发布'",params![format!("memos:{id}:publish"),now_ms])?;
+    Ok(())
+}
+
+fn segment_tags(conn: &Connection, id: &str) -> StorageResult<Vec<String>> {
+    let mut statement = conn.prepare("SELECT tag.name FROM tag JOIN segment_tag ON tag.id=segment_tag.tag_id WHERE segment_id=?1 ORDER BY tag.name")?;
+    let rows = statement.query_map([id], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn write_segment_tags(conn: &Connection, segment: &Segment, now_ms: i64) -> StorageResult<()> {
+    conn.execute("DELETE FROM segment_tag WHERE segment_id=?1", [&segment.id])?;
+    for name in &segment.tags {
+        let tag_id = dotlog_application::new_id();
+        conn.execute("INSERT INTO tag(id,name,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,?3) ON CONFLICT(name) DO NOTHING", params![tag_id,name,now_ms])?;
+        conn.execute("INSERT OR IGNORE INTO segment_tag(segment_id,tag_id,created_at_ms) SELECT ?1,id,?3 FROM tag WHERE name=?2 COLLATE NOCASE", params![segment.id,name,now_ms])?;
+    }
+    Ok(())
+}
+
+pub fn paused_session(conn: &Connection) -> StorageResult<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM record_session WHERE status='paused') AND NOT EXISTS(SELECT 1 FROM time_segment WHERE status='active')", [], |r| r.get(0))?)
+}
+
+pub fn session_segments(conn: &Connection, id: &str) -> StorageResult<Vec<Segment>> {
+    let mut statement=conn.prepare("SELECT segment_id FROM session_segment WHERE session_id=(SELECT session_id FROM session_segment WHERE segment_id=?1)")?;
+    let ids = statement
+        .query_map([id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut segments = Vec::new();
+    for id in ids {
+        if let Some(segment) = find_segment_by_id(conn, &id)? {
+            segments.push(segment);
+        }
+    }
+    segments.sort_by_key(|s| s.start_at_ms);
+    Ok(segments)
+}
+
+pub fn current_session_segments(conn: &Connection) -> StorageResult<Vec<Segment>> {
+    let id: Option<String>=conn.query_row("SELECT anchor_segment_id FROM record_session WHERE status IN ('active','paused') ORDER BY updated_at_ms DESC,id DESC LIMIT 1",[],|r|r.get(0)).optional()?;
+    match id {
+        Some(id) => session_segments(conn, &id),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn update_sessions(
+    conn: &Connection,
+    effects: &[Effect],
+    previous: Option<&str>,
+    undone: Option<&(String, Option<String>)>,
+    now_ms: i64,
+) -> StorageResult<()> {
+    let resuming = effects
+        .iter()
+        .any(|e| matches!(e,Effect::InsertTimePoint(p) if p.kind==PointKind::Resume));
+    for effect in effects {
+        if let Effect::InsertSegment(segment) = effect {
+            let session = if resuming && segment.is_active() {
+                previous.unwrap_or(&segment.id)
+            } else {
+                &segment.id
+            };
+            if segment.is_active() {
+                conn.execute("UPDATE record_session SET status='finished' WHERE status IN ('active','paused') AND id<>?1",[session])?;
+            }
+            conn.execute("INSERT INTO record_session(id,status,anchor_segment_id,updated_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET status=excluded.status,anchor_segment_id=excluded.anchor_segment_id,updated_at_ms=excluded.updated_at_ms",
+                params![session,if segment.is_active(){"active"}else{"finished"},segment.id,now_ms])?;
+            conn.execute(
+                "INSERT INTO session_segment(segment_id,session_id) VALUES(?1,?2)",
+                params![segment.id, session],
+            )?;
+        }
+    }
+    for effect in effects {
+        if let Effect::InsertTimePoint(point) = effect {
+            if let Some(id) = &point.segment_id {
+                let status = match point.kind {
+                    PointKind::Pause => Some("paused"),
+                    PointKind::Finish | PointKind::Punch => Some("finished"),
+                    _ => None,
+                };
+                if let Some(status) = status {
+                    conn.execute("UPDATE record_session SET status=?2,anchor_segment_id=?1,updated_at_ms=?3 WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",params![id,status,now_ms])?;
+                }
+            }
+            if point.kind == PointKind::Undo {
+                let payload = point
+                    .payload
+                    .as_deref()
+                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok());
+                let paused_id = payload
+                    .as_ref()
+                    .and_then(|p| p.get("restorePausedSession"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        undone.and_then(|(kind, id)| {
+                            if kind == "resume" {
+                                id.as_deref()
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                if let Some(id) = paused_id {
+                    conn.execute("UPDATE record_session SET status='paused',updated_at_ms=?2 WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",params![id,now_ms])?;
+                }
+            }
+        }
+    }
+    for effect in effects {
+        if let Effect::InsertTimePoint(point) = effect {
+            if let Some(id) = &point.segment_id {
+                if matches!(point.kind, PointKind::Finish | PointKind::Punch) {
+                    let link_note_pending = point
+                        .payload
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                        .and_then(|value| value.get("awaitNote").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    let prompt = link_note_pending
+                        || setting_rows(conn, "app")?
+                            .into_iter()
+                            .find(|(k, _)| k == "notify.on_punch")
+                            .map(|(_, v)| v != "false")
+                            .unwrap_or(true);
+                    conn.execute("UPDATE record_session SET publish_ready=?2 WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",params![id,i64::from(!prompt)])?;
+                } else if point.kind == PointKind::Edit {
+                    let confirmed = point
+                        .payload
+                        .as_deref()
+                        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                        .and_then(|v| v.get("tomatodoNoteConfirmed").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    if confirmed || !link_note_pending(conn, id)? {
+                        conn.execute("UPDATE record_session SET publish_ready=1 WHERE id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",[id])?;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(active) = find_active_segment(conn)? {
+        conn.execute("UPDATE record_session SET status=CASE WHEN id=(SELECT session_id FROM session_segment WHERE segment_id=?1) THEN 'active' ELSE 'finished' END WHERE status IN ('active','paused') OR id=(SELECT session_id FROM session_segment WHERE segment_id=?1)",[&active.id])?;
+    } else {
+        conn.execute(
+            "UPDATE record_session SET status='finished' WHERE status='active'",
+            [],
+        )?;
+    }
+    conn.execute("UPDATE record_session SET status='finished' WHERE NOT EXISTS(SELECT 1 FROM session_segment JOIN time_segment ON time_segment.id=session_segment.segment_id WHERE session_segment.session_id=record_session.id AND time_segment.status<>'deleted')",[])?;
+    Ok(())
 }

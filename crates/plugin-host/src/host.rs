@@ -11,12 +11,13 @@ use std::time::Duration;
 use dotlog_application::{link_state, TimerStore};
 use dotlog_domain::Segment;
 use dotlog_plugin_sdk::{
-    Capability, HttpClient, IntegrationLinks, LinkRecord, OutboxEnv, OutboxHandler, OutboxInput,
-    OutboxOutcome, OutboxSink, Plugin, PluginCtx, PluginError, PluginLogger, PluginManifest,
-    PluginSettings, SegmentQuery, SegmentSnapshot, SecretStore, TagWriter, validate_manifest,
+    validate_manifest, Capability, HttpClient, IntegrationLinks, LinkRecord, OutboxEnv,
+    OutboxHandler, OutboxInput, OutboxOutcome, OutboxSink, Plugin, PluginCtx, PluginError,
+    PluginLogger, PluginManifest, PluginSettings, SecretStore, SegmentQuery, SegmentSnapshot,
+    TagWriter,
 };
 
-use crate::net::{KeyringStore, UreqClient, host_of};
+use crate::net::{host_of, KeyringStore, UreqClient};
 
 /// host 日志出口；desktop 注入每日文件日志实现，日志必须带插件 id（§12.4）。
 pub trait HostLogger: Send + Sync {
@@ -48,6 +49,7 @@ pub struct PluginHost {
     logger: Arc<dyn HostLogger>,
     plugins: Mutex<Vec<Registered>>,
     handlers: Mutex<Vec<Arc<dyn OutboxHandler>>>,
+    pub lifecycle: Mutex<()>,
 }
 
 impl PluginHost {
@@ -57,6 +59,7 @@ impl PluginHost {
             logger,
             plugins: Mutex::new(Vec::new()),
             handlers: Mutex::new(Vec::new()),
+            lifecycle: Mutex::new(()),
         }
     }
 
@@ -68,38 +71,37 @@ impl PluginHost {
     pub fn register(&self, plugin: Arc<dyn Plugin>) {
         let manifest = plugin.manifest();
         if let Err(error) = validate_manifest(&manifest) {
-            self.log("ERROR", &manifest.id, &format!("manifest 校验失败：{error}"));
+            self.log(
+                "ERROR",
+                &manifest.id,
+                &format!("manifest 校验失败：{error}"),
+            );
             return;
         }
         let id = manifest.id.clone();
         let init_id = id.clone();
         let init_ok = self
-            .call_with_timeout(
-                &id,
-                "init",
-                INIT_TIMEOUT,
-                {
-                    let plugin = Arc::clone(&plugin);
-                    let store = Arc::clone(&self.store);
-                    let logger = Arc::clone(&self.logger);
-                    let capabilities = manifest.capabilities.clone();
-                    let network_hosts = manifest.network_hosts.clone();
-                    let entries = self.read_settings(&id);
-                    move || {
-                        let kit = EnvKit::build(
-                            store,
-                            logger,
-                            init_id,
-                            capabilities,
-                            network_hosts,
-                            entries,
-                            0,
-                        );
-                        let ctx = kit.ctx();
-                        plugin.init(&ctx)
-                    }
-                },
-            )
+            .call_with_timeout(&id, "init", INIT_TIMEOUT, {
+                let plugin = Arc::clone(&plugin);
+                let store = Arc::clone(&self.store);
+                let logger = Arc::clone(&self.logger);
+                let capabilities = manifest.capabilities.clone();
+                let network_hosts = manifest.network_hosts.clone();
+                let entries = self.read_settings(&id);
+                move || {
+                    let kit = EnvKit::build(
+                        store,
+                        logger,
+                        init_id,
+                        capabilities,
+                        network_hosts,
+                        entries,
+                        0,
+                    );
+                    let ctx = kit.ctx();
+                    plugin.init(&ctx)
+                }
+            })
             .unwrap_or(Err(PluginError::Timeout));
 
         match init_ok {
@@ -135,7 +137,18 @@ impl PluginHost {
     }
 
     /// 启用状态存 `plugin:<id>.enabled`；默认停用。
+    pub fn plugin_installed(&self, plugin_id: &str) -> bool {
+        self.read_settings(plugin_id)
+            .into_iter()
+            .find(|(key, _)| key == "installed")
+            .and_then(|(_, value)| serde_json::from_str::<bool>(&value).ok())
+            .unwrap_or(true)
+    }
+
     pub fn plugin_enabled(&self, plugin_id: &str) -> bool {
+        if !self.plugin_installed(plugin_id) {
+            return false;
+        }
         self.store
             .settings(&Self::scope_of(plugin_id))
             .ok()
@@ -152,7 +165,7 @@ impl PluginHost {
         let scope = Self::scope_of(plugin_id);
         if let Err(error) = self
             .store
-            .settings_upsert(&scope, &[( "enabled".into(), value)], now_ms)
+            .settings_upsert(&scope, &[("enabled".into(), value)], now_ms)
         {
             self.log("ERROR", plugin_id, &format!("启停状态写入失败：{error}"));
         }
@@ -192,14 +205,21 @@ impl PluginHost {
             std::thread::spawn(move || {
                 // 串行锁在派生线程内持有：超时的孤儿线程继续占用，
                 // 后续事件排队，避免同一插件乱序（§5）。
-                let Target { id, plugin, exec_lock, capabilities, network_hosts } = target;
-                let _serial = exec_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let Target {
+                    id,
+                    plugin,
+                    exec_lock,
+                    capabilities,
+                    network_hosts,
+                } = target;
+
                 let started = std::time::Instant::now();
                 let (tx, rx) = mpsc::channel();
                 let inner_id = id.clone();
                 let inner_store = Arc::clone(&store);
                 let inner_logger = Arc::clone(&logger);
                 std::thread::spawn(move || {
+                    let _serial = exec_lock.lock().unwrap_or_else(|e| e.into_inner());
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let kit = EnvKit::build(
                             Arc::clone(&inner_store),
@@ -218,7 +238,11 @@ impl PluginHost {
                 match rx.recv_timeout(EVENT_TIMEOUT) {
                     Ok(Ok(Ok(()))) => {
                         let elapsed = started.elapsed().as_millis();
-                        logger.log("INFO", &id, &format!("on_segment_closed 完成，耗时 {elapsed} ms"));
+                        logger.log(
+                            "INFO",
+                            &id,
+                            &format!("on_segment_closed 完成，耗时 {elapsed} ms"),
+                        );
                     }
                     Ok(Ok(Err(error))) => {
                         logger.log("WARN", &id, &format!("on_segment_closed 失败：{error}"));
@@ -242,6 +266,7 @@ impl PluginHost {
     /// 处理一批到期事件；返回处理数量。desktop 的 worker 线程按
     /// [`TICK_INTERVAL`] 轮询，手动重试后立即调用一次。
     pub fn run_outbox_tick(&self, now_ms: i64) -> usize {
+        let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         let due = match self.store.outbox_take_due(now_ms, 20) {
             Ok(due) => due,
             Err(error) => {
@@ -259,7 +284,12 @@ impl PluginHost {
             processed += 1;
             let payload: serde_json::Value =
                 serde_json::from_str(&record.payload).unwrap_or(serde_json::Value::Null);
-            let provider = record.event_type.split('.').next().unwrap_or("unknown").to_string();
+            let provider = record
+                .event_type
+                .split('.')
+                .next()
+                .unwrap_or("unknown")
+                .to_string();
 
             let Some(handler) = handlers
                 .iter()
@@ -274,7 +304,28 @@ impl PluginHost {
                 continue;
             };
 
+            if record.event_type == "memos.publish" && now_ms < record.created_at_ms + 65_000 {
+                let _ = self
+                    .store
+                    .outbox_defer(&record.id, record.created_at_ms + 65_000, now_ms);
+                continue;
+            }
+            if record.event_type == "memos.publish" {
+                if let Some(id) = payload.get("segmentId").and_then(|v| v.as_str()) {
+                    match self.store.publication_ready(id) {
+                        Ok(true) => {}
+                        _ => {
+                            let _ = self.store.outbox_defer(&record.id, now_ms + 30_000, now_ms);
+                            continue;
+                        }
+                    }
+                }
+            }
             let plugin_id = handler.plugin_id().to_string();
+            if !self.plugin_enabled(&plugin_id) {
+                let _ = self.store.outbox_defer(&record.id, now_ms + 30_000, now_ms);
+                continue;
+            }
             let (capabilities, network_hosts) = self
                 .manifest_of(&plugin_id)
                 .map(|manifest| (manifest.capabilities, manifest.network_hosts))
@@ -283,29 +334,24 @@ impl PluginHost {
             let handle_plugin = plugin_id.clone();
             let handle_payload = payload.clone();
             let outcome = self
-                .call_with_timeout(
-                    &plugin_id,
-                    "outbox.handle",
-                    HANDLER_TIMEOUT,
-                    {
-                        let handler = Arc::clone(handler);
-                        let store = Arc::clone(&self.store);
-                        let logger = Arc::clone(&self.logger);
-                        move || {
-                            let kit = EnvKit::build(
-                                store,
-                                logger,
-                                handle_plugin,
-                                capabilities,
-                                network_hosts,
-                                entries,
-                                now_ms,
-                            );
-                            let env = kit.outbox_env();
-                            handler.handle(&handle_payload, &env)
-                        }
-                    },
-                )
+                .call_with_timeout(&plugin_id, "outbox.handle", HANDLER_TIMEOUT, {
+                    let handler = Arc::clone(handler);
+                    let store = Arc::clone(&self.store);
+                    let logger = Arc::clone(&self.logger);
+                    move || {
+                        let kit = EnvKit::build(
+                            store,
+                            logger,
+                            handle_plugin,
+                            capabilities,
+                            network_hosts,
+                            entries,
+                            now_ms,
+                        );
+                        let env = kit.outbox_env();
+                        handler.handle(&handle_payload, &env)
+                    }
+                })
                 .unwrap_or(OutboxOutcome::Fail {
                     error: "处理器超时（10 s）".into(),
                 });
@@ -313,13 +359,22 @@ impl PluginHost {
             match outcome {
                 OutboxOutcome::Done { external_id } => {
                     let _ = self.store.outbox_mark_done(&record.id, now_ms);
-                    self.update_link(&payload, &provider, external_id.as_deref(), link_state::PUBLISHED, None, now_ms);
+                    self.update_link(
+                        &payload,
+                        &provider,
+                        external_id.as_deref(),
+                        link_state::PUBLISHED,
+                        None,
+                        now_ms,
+                    );
                     self.log("INFO", &plugin_id, &format!("事件 {} 处理完成", record.id));
                 }
                 OutboxOutcome::RetryLater { error } => {
                     let index = (record.attempts.max(0) as usize).min(BACKOFF_MS.len() - 1);
                     let delay = BACKOFF_MS[index];
-                    let _ = self.store.outbox_mark_retry(&record.id, &error, now_ms + delay, now_ms);
+                    let _ =
+                        self.store
+                            .outbox_mark_retry(&record.id, &error, now_ms + delay, now_ms);
                     self.log(
                         "WARN",
                         &plugin_id,
@@ -333,8 +388,19 @@ impl PluginHost {
                 }
                 OutboxOutcome::Fail { error } => {
                     let _ = self.store.outbox_mark_failed(&record.id, &error, now_ms);
-                    self.update_link(&payload, &provider, None, link_state::FAILED, Some(&error), now_ms);
-                    self.log("ERROR", &plugin_id, &format!("事件 {} 处理失败：{error}", record.id));
+                    self.update_link(
+                        &payload,
+                        &provider,
+                        None,
+                        link_state::FAILED,
+                        Some(&error),
+                        now_ms,
+                    );
+                    self.log(
+                        "ERROR",
+                        &plugin_id,
+                        &format!("事件 {} 处理失败：{error}", record.id),
+                    );
                 }
             }
         }
@@ -353,9 +419,14 @@ impl PluginHost {
         let Some(segment_id) = payload.get("segmentId").and_then(|v| v.as_str()) else {
             return;
         };
-        let _ = self
-            .store
-            .integration_link_upsert(segment_id, provider, external_id, state, error, now_ms);
+        let _ = self.store.integration_link_upsert(
+            segment_id,
+            provider,
+            external_id,
+            state,
+            error,
+            now_ms,
+        );
     }
 
     /// 在独立线程执行 `f`（panic 隔离 + 超时）；超时/panic 返回 `None`。
@@ -383,7 +454,11 @@ impl PluginHost {
                 None
             }
             Err(_) => {
-                self.log("WARN", plugin_id, &format!("{label} 超时（{} ms）", timeout.as_millis()));
+                self.log(
+                    "WARN",
+                    plugin_id,
+                    &format!("{label} 超时（{} ms）", timeout.as_millis()),
+                );
                 None
             }
         }
@@ -458,7 +533,9 @@ impl EnvKit {
                 store: Arc::clone(&store),
                 now_ms,
             },
-            settings: StoreSettings { entries: settings_entries },
+            settings: StoreSettings {
+                entries: settings_entries,
+            },
             links: StoreLinks {
                 store: Arc::clone(&store),
             },
@@ -471,10 +548,9 @@ impl EnvKit {
                 timeout_ms: HTTP_TIMEOUT_MS,
             }),
             secrets: has(&Capability::SecretStore).then(|| KeyringStore::for_plugin(&plugin_id)),
-            segments: has(&Capability::SegmentsRead)
-                .then(|| StoreSegmentQuery {
-                    store: Arc::clone(&store),
-                }),
+            segments: has(&Capability::SegmentsRead).then(|| StoreSegmentQuery {
+                store: Arc::clone(&store),
+            }),
             tags: has(&Capability::TagsWrite).then(|| StoreTagWriter {
                 store: Arc::clone(&store),
             }),
@@ -502,6 +578,7 @@ impl EnvKit {
     /// outbox handler 运行环境：同样按能力裁决。
     fn outbox_env(&self) -> OutboxEnv<'_> {
         OutboxEnv {
+            segments: self.segments.as_ref().map(|q| q as &dyn SegmentQuery),
             http: self.http.as_ref().map(|h| h as &dyn HttpClient),
             secrets: self.secrets.as_ref().map(|s| s as &dyn SecretStore),
             settings: &self.settings,
@@ -524,7 +601,12 @@ impl OutboxSink for StoreOutboxSink {
         let payload = serde_json::to_string(&event.payload)
             .map_err(|error| PluginError::Other(error.to_string()))?;
         self.store
-            .outbox_enqueue(Some(&event.dedupe_key), &event.event_type, &payload, self.now_ms)
+            .outbox_enqueue(
+                Some(&event.dedupe_key),
+                &event.event_type,
+                &payload,
+                self.now_ms,
+            )
             // 去重键已存在（返回 false）视为幂等成功（§6）。
             .map(|_enqueued| ())
             .map_err(|error| PluginError::Storage(error.to_string()))
@@ -573,7 +655,14 @@ impl IntegrationLinks for StoreLinks {
         now_ms: i64,
     ) -> Result<(), PluginError> {
         self.store
-            .integration_link_upsert(segment_id, provider, Some(external_id), link_state::PUBLISHED, None, now_ms)
+            .integration_link_upsert(
+                segment_id,
+                provider,
+                Some(external_id),
+                link_state::PUBLISHED,
+                None,
+                now_ms,
+            )
             .map_err(|error| PluginError::Storage(error.to_string()))
     }
 
@@ -585,7 +674,14 @@ impl IntegrationLinks for StoreLinks {
         now_ms: i64,
     ) -> Result<(), PluginError> {
         self.store
-            .integration_link_upsert(segment_id, provider, None, link_state::FAILED, Some(error), now_ms)
+            .integration_link_upsert(
+                segment_id,
+                provider,
+                None,
+                link_state::FAILED,
+                Some(error),
+                now_ms,
+            )
             .map_err(|error| PluginError::Storage(error.to_string()))
     }
 }
@@ -614,6 +710,46 @@ struct StoreSegmentQuery {
 }
 
 impl SegmentQuery for StoreSegmentQuery {
+    fn segment_by_id(&self, id: &str) -> Result<Option<SegmentSnapshot>, PluginError> {
+        let segment = self
+            .store
+            .find_segment(id)
+            .map_err(|e| PluginError::Storage(e.to_string()))?;
+        let categories = self
+            .store
+            .categories()
+            .map_err(|e| PluginError::Storage(e.to_string()))?;
+        let Some(segment) = segment else {
+            return Ok(None);
+        };
+        if self
+            .store
+            .current_session_segments()
+            .map_err(|e| PluginError::Storage(e.to_string()))?
+            .iter()
+            .any(|s| s.id == id)
+        {
+            return Ok(None);
+        }
+        let slices = self
+            .store
+            .session_segments(id)
+            .map_err(|e| PluginError::Storage(e.to_string()))?;
+        if slices.iter().any(|s| s.is_active()) {
+            return Ok(None);
+        }
+        let mut snapshot = segment_snapshot(&segment, &categories);
+        if let Some(first) = slices.first() {
+            snapshot.start_at_ms = first.start_at_ms;
+        }
+        snapshot.end_at_ms = slices.iter().filter_map(|s| s.end_at_ms).max().unwrap_or(snapshot.end_at_ms);
+        snapshot.duration_seconds = slices
+            .iter()
+            .map(|s| s.duration_ms(s.end_at_ms.unwrap_or(s.start_at_ms)))
+            .sum::<i64>()
+            / 1000;
+        Ok(Some(snapshot))
+    }
     fn segments_between(
         &self,
         from_ms: i64,
@@ -648,7 +784,10 @@ impl TagWriter for StoreTagWriter {
 }
 
 /// 领域段 → 不可变快照。
-pub fn segment_snapshot(segment: &Segment, categories: &[dotlog_application::CategoryRow]) -> SegmentSnapshot {
+pub fn segment_snapshot(
+    segment: &Segment,
+    categories: &[dotlog_application::CategoryRow],
+) -> SegmentSnapshot {
     let end = segment.end_at_ms.unwrap_or(segment.start_at_ms);
     let category_name = segment
         .category_id

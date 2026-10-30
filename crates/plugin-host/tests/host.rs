@@ -6,14 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dotlog_application::{
-    AppResult, CategoryRow, IntegrationLinkRow, OutboxRecord, PointRecord, TimerSnapshot,
-    TimerStore, link_state, outbox_state,
+    link_state, outbox_state, AppResult, CategoryRow, IntegrationLinkRow, OutboxRecord,
+    PointRecord, TimerSnapshot, TimerStore,
 };
 use dotlog_domain::{Effect, Segment};
-use dotlog_plugin_host::host::{BACKOFF_MS, HostLogger, PluginHost};
+use dotlog_plugin_host::host::{HostLogger, PluginHost, BACKOFF_MS};
 use dotlog_plugin_sdk::{
-    API_VERSION, Capability, CloseReason, OutboxEnv, OutboxHandler, OutboxInput, OutboxOutcome,
-    Plugin, PluginCtx, PluginError, PluginManifest, SegmentClosedEvent, SegmentSnapshot,
+    Capability, CloseReason, OutboxEnv, OutboxHandler, OutboxInput, OutboxOutcome, Plugin,
+    PluginCtx, PluginError, PluginManifest, SegmentClosedEvent, SegmentSnapshot, API_VERSION,
 };
 use serde_json::json;
 
@@ -36,7 +36,9 @@ struct MockData {
 
 impl MockStore {
     fn new() -> Arc<Self> {
-        Arc::new(Self { inner: Mutex::new(MockData::default()) })
+        Arc::new(Self {
+            inner: Mutex::new(MockData::default()),
+        })
     }
 
     fn outbox_first(&self) -> Option<OutboxRecord> {
@@ -58,7 +60,11 @@ impl TimerStore for MockStore {
     fn snapshot(&self) -> AppResult<TimerSnapshot> {
         let data = self.inner.lock().unwrap();
         Ok(TimerSnapshot {
-            active: data.segments.iter().find(|s| s.end_at_ms.is_none()).cloned(),
+            active: data
+                .segments
+                .iter()
+                .find(|s| s.end_at_ms.is_none())
+                .cloned(),
             last_point_kind: None,
         })
     }
@@ -166,7 +172,11 @@ impl TimerStore for MockStore {
     ) -> AppResult<bool> {
         let mut data = self.inner.lock().unwrap();
         if let Some(key) = dedupe_key {
-            if data.outbox.iter().any(|r| r.dedupe_key.as_deref() == Some(key)) {
+            if data
+                .outbox
+                .iter()
+                .any(|r| r.dedupe_key.as_deref() == Some(key))
+            {
                 return Ok(false);
             }
         }
@@ -348,10 +358,11 @@ struct MockLogger {
 
 impl HostLogger for MockLogger {
     fn log(&self, level: &str, plugin_id: &str, message: &str) {
-        self.entries
-            .lock()
-            .unwrap()
-            .push((level.to_string(), plugin_id.to_string(), message.to_string()));
+        self.entries.lock().unwrap().push((
+            level.to_string(),
+            plugin_id.to_string(),
+            message.to_string(),
+        ));
     }
 }
 
@@ -534,8 +545,15 @@ fn event_flow_enqueues_outbox_and_publishes_link_idempotently() {
     assert!(host.plugin_enabled("publisher"));
 
     host.dispatch_segment_closed(&event("seg-1"));
-    assert!(wait_for(|| plugin.event_count() == 1, 2_000), "启用的插件应收到事件");
-    assert_eq!(store.outbox_list(None, 100).unwrap().len(), 1, "应入队一条事件");
+    assert!(
+        wait_for(|| plugin.event_count() == 1, 2_000),
+        "启用的插件应收到事件"
+    );
+    assert_eq!(
+        store.outbox_list(None, 100).unwrap().len(),
+        1,
+        "应入队一条事件"
+    );
 
     let outcome = Arc::new(Mutex::new(OutboxOutcome::Done {
         external_id: Some("memo-1".into()),
@@ -558,8 +576,16 @@ fn event_flow_enqueues_outbox_and_publishes_link_idempotently() {
     // 同一事件再次分发：去重键相同，不产生新事件。
     host.dispatch_segment_closed(&event("seg-1"));
     assert!(wait_for(|| plugin.event_count() == 2, 2_000));
-    assert_eq!(store.outbox_list(None, 100).unwrap().len(), 1, "去重键应阻止重复入队");
-    assert_eq!(host.run_outbox_tick(NOW + 2_000), 0, "已完成的事件不应重复处理");
+    assert_eq!(
+        store.outbox_list(None, 100).unwrap().len(),
+        1,
+        "去重键应阻止重复入队"
+    );
+    assert_eq!(
+        host.run_outbox_tick(NOW + 2_000),
+        0,
+        "已完成的事件不应重复处理"
+    );
 }
 
 #[test]
@@ -593,7 +619,10 @@ fn panicking_plugin_does_not_break_host() {
 
     // host 仍正常分发后续事件给其它插件。
     host.dispatch_segment_closed(&event("seg-2"));
-    assert!(wait_for(|| recorder.event_count() == 1, 2_000), "其它插件应照常收到事件");
+    assert!(
+        wait_for(|| recorder.event_count() == 1, 2_000),
+        "其它插件应照常收到事件"
+    );
 }
 
 #[test]
@@ -602,7 +631,10 @@ fn undeclared_capabilities_are_not_injected() {
     store
         .settings_upsert(
             "plugin:inspector",
-            &[("instanceUrl".into(), serde_json::to_string("https://memos.local").unwrap())],
+            &[(
+                "instanceUrl".into(),
+                serde_json::to_string("https://memos.local").unwrap(),
+            )],
             NOW,
         )
         .unwrap();
@@ -629,6 +661,7 @@ fn undeclared_capabilities_are_not_injected() {
 fn outbox_backoff_manual_retry_and_recovery() {
     let store = MockStore::new();
     let host = PluginHost::new(store.clone(), Arc::new(MockLogger::default()));
+    host.set_enabled("publisher", true, NOW);
     let outcome = Arc::new(Mutex::new(OutboxOutcome::RetryLater {
         error: "网络不可达".into(),
     }));
@@ -654,7 +687,12 @@ fn outbox_backoff_manual_retry_and_recovery() {
     ];
     let mut now = NOW;
     for (round, delay) in delays.iter().enumerate() {
-        assert_eq!(host.run_outbox_tick(now), 1, "第 {} 轮应处理到期事件", round + 1);
+        assert_eq!(
+            host.run_outbox_tick(now),
+            1,
+            "第 {} 轮应处理到期事件",
+            round + 1
+        );
         assert_eq!(host.run_outbox_tick(now), 0, "退避期内不应重复取出");
         let record = store.outbox_first().unwrap();
         if round == delays.len() - 1 {
@@ -691,11 +729,42 @@ fn outbox_backoff_manual_retry_and_recovery() {
 fn event_without_handler_is_deferred_six_hours() {
     let store = MockStore::new();
     let host = PluginHost::new(store.clone(), Arc::new(MockLogger::default()));
-    store.outbox_enqueue(Some("k2"), "ghost.ping", "{}", NOW).unwrap();
+    store
+        .outbox_enqueue(Some("k2"), "ghost.ping", "{}", NOW)
+        .unwrap();
 
     assert_eq!(host.run_outbox_tick(NOW), 1);
     let record = store.outbox_first().unwrap();
     assert_eq!(record.state, outbox_state::PENDING);
     assert_eq!(record.next_retry_at_ms, Some(NOW + 6 * 3_600_000));
     assert!(record.last_error.as_deref().unwrap().contains("处理器"));
+}
+
+#[test]
+fn disabling_owner_stops_already_queued_handler() {
+    let store = MockStore::new();
+    let host = PluginHost::new(store.clone(), Arc::new(MockLogger::default()));
+    let plugin = TestPlugin::new("publisher", vec![], Mode::Record);
+    host.register(plugin);
+    host.set_enabled("publisher", true, NOW);
+    let outcome = Arc::new(Mutex::new(OutboxOutcome::Done {
+        external_id: Some("remote".into()),
+    }));
+    host.register_handler(Arc::new(TestHandler {
+        plugin_id: "publisher".into(),
+        event_type: "test.publish",
+        outcome,
+    }));
+    store
+        .outbox_enqueue(
+            Some("disable-test"),
+            "test.publish",
+            r#"{"segmentId":"seg-1"}"#,
+            NOW,
+        )
+        .unwrap();
+    host.set_enabled("publisher", false, NOW + 1);
+    host.run_outbox_tick(NOW + 2);
+    assert_ne!(store.outbox_first().unwrap().state, outbox_state::DONE);
+    assert!(store.link("seg-1", "test").is_none());
 }

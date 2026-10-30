@@ -9,6 +9,7 @@ use dotlog_plugin_sdk::{HttpClient, HttpRequest};
 /// - v0.14-0.21：`/api/v1/status`（公开）
 /// - v0.13 及更早：`/api/status`、`/api/memo`
 const PROBE_CANDIDATES: &[(&str, &str)] = &[
+    ("/api/instance/profile", "current"),
     ("/api/v1/workspace/profile", "v1"),
     ("/api/v1/memos", "v1"),
     ("/api/v1/status", "v1"),
@@ -56,6 +57,7 @@ pub fn normalize_base(url: &str) -> Option<String> {
 pub fn publish_path(api_version: &str) -> Option<&'static str> {
     match api_version {
         "v1" | "" => Some("/api/v1/memos"),
+        "current" => Some("/api/memos"),
         "v0" => Some("/api/memo"),
         _ => None,
     }
@@ -155,7 +157,12 @@ fn probe_once(http: &dyn HttpClient, url: &str, token: Option<&str>) -> ProbeRes
         timeout_ms: PROBE_TIMEOUT_MS,
     };
     match http.send(request) {
-        Ok(response) if response.is_success() => ProbeResult::Success,
+        Ok(response) if response.is_success() => {
+            match serde_json::from_slice::<serde_json::Value>(&response.body) {
+                Ok(value) if value.is_object() || value.is_array() => ProbeResult::Success,
+                _ => ProbeResult::HttpStatus(response.status, "响应不是有效的 Memos JSON".into()),
+            }
+        }
         Ok(response) => {
             let status = response.status;
             let body = truncate_body(response.text());
@@ -172,7 +179,7 @@ fn probe_once(http: &dyn HttpClient, url: &str, token: Option<&str>) -> ProbeRes
 fn truncate_body(body: String) -> String {
     let trimmed = body.trim();
     if trimmed.len() > 200 {
-        format!("{}…", &trimmed[..200])
+        format!("{}…", trimmed.chars().take(200).collect::<String>())
     } else {
         trimmed.to_string()
     }

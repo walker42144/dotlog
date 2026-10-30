@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { formatDuration, formatTime, fromLocalInput, toLocalInput } from "../lib/format";
 import {
+  ipc,
   friendlyMessage,
+  type CategoryView,
   toIpcError,
   type BackfillInput,
   type ConflictView,
@@ -70,6 +72,12 @@ export function SegmentEditor({
   const initialStart = target.mode === "edit" ? target.segment.startAt : target.startAt;
   const initialEnd = target.mode === "edit" ? target.segment.endAt : target.endAt;
 
+  const [categories, setCategories] = useState<CategoryView[]>([]);
+  const [categoryId, setCategoryId] = useState(editing?.category?.id ?? "");
+  const [focus, setFocus] = useState(editing?.isFocus ?? false);
+  const [ignored, setIgnored] = useState(editing?.isIgnored ?? false);
+  const [tags, setTags] = useState(editing?.tags.map((t) => t.name).join(", ") ?? "");
+  useEffect(() => { void ipc.categories().then(setCategories).catch(() => setCategories([])); }, []);
   const [title, setTitle] = useState(editing?.title ?? "");
   const [note, setNote] = useState(editing?.note ?? "");
   const [startInput, setStartInput] = useState(() => toLocalInput(initialStart));
@@ -120,13 +128,18 @@ export function SegmentEditor({
 
     if (target.mode === "backfill") {
       void runAction(() =>
-        onBackfill({ startAt: startMs, endAt: endMs as number, title, note })
+        onBackfill({ startAt: startMs, endAt: endMs as number, title, note, categoryId: categoryId || null, isFocus: focus, isIgnored: ignored })
       );
       return;
     }
 
     const segment = target.segment;
     const patch: SegmentPatch = {};
+    if (categoryId !== (segment.category?.id ?? "")) patch.categoryId = categoryId || null;
+    if (focus !== segment.isFocus) patch.isFocus = focus;
+    if (ignored !== segment.isIgnored) patch.isIgnored = ignored;
+    const parsedTags = tags.split(/[,，]/).map((s) => s.trim().replace(/^#/, "")).filter(Boolean);
+    if (parsedTags.join(",") !== segment.tags.map((t) => t.name).join(",")) patch.tags = parsedTags;
     if (title.trim() !== segment.title) patch.title = title;
     const nextNote = note.trim();
     if (nextNote !== (segment.note ?? "")) patch.note = note;
@@ -257,6 +270,11 @@ export function SegmentEditor({
         </label>
 
         <div className="field-row">
+          <label className="field"><span className="field__label">分类</span><select className="field__input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}><option value="">未分类</option>{categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
+          {editing && <label className="field"><span className="field__label">标签（逗号分隔）</span><input className="field__input" value={tags} onChange={(e) => setTags(e.target.value)} maxLength={1200} /></label>}
+        </div>
+        <div className="plugin-manager-actions"><label><input type="checkbox" checked={focus} onChange={(e) => setFocus(e.target.checked)} /> 专注记录</label><label><input type="checkbox" checked={ignored} onChange={(e) => setIgnored(e.target.checked)} /> 不计入有效时长</label></div>
+        <div className="field-row">
           <label className="field">
             <span className="field__label">开始时间</span>
             <input
@@ -327,7 +345,7 @@ export function SegmentEditor({
         <footer className="modal__foot">
           {confirmingDelete ? (
             <>
-              <span className="modal__hint">确定删除这段记录？15 秒内可撤销。</span>
+              <span className="modal__hint">确定删除这段记录？可在设置的撤销时限内恢复。</span>
               <div className="modal__actions">
                 <button
                   className="ghost-btn"

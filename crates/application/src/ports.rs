@@ -98,13 +98,27 @@ impl IntegrityReport {
     }
 }
 
-
 /// 计时持久化端口。由 `dotlog-storage` 实现，应用层不感知 SQLite。
 pub trait TimerStore: Send + Sync {
     fn snapshot(&self) -> AppResult<TimerSnapshot>;
 
     /// 在单个事务内应用全部变更；任一步失败必须整体回滚。
     fn commit(&self, effects: &[Effect], now_ms: i64) -> AppResult<()>;
+
+    /// Atomically persist link ownership/notes and timer facts. No non-atomic fallback.
+    fn commit_runtime(
+        &self,
+        _effects: &[Effect],
+        _key: &str,
+        _value: &str,
+        _now_ms: i64,
+    ) -> AppResult<()> {
+        Err(AppError::store("E_LINK_STORE", "存储未实现原子联动提交"))
+    }
+
+    fn tomatodo_source_seen(&self, _start_ms: i64) -> AppResult<bool> {
+        Ok(false)
+    }
 
     /// 与 `[from_ms, to_ms)` 相交的非删除段，按开始时间升序。
     fn day_segments(&self, from_ms: i64, to_ms: i64) -> AppResult<Vec<Segment>>;
@@ -114,6 +128,24 @@ pub trait TimerStore: Send + Sync {
 
     /// 最近一条未被撤销的时间点。
     fn last_point(&self) -> AppResult<Option<PointRecord>>;
+
+    fn session_segments(&self, id: &str) -> AppResult<Vec<Segment>> {
+        Ok(self.find_segment(id)?.into_iter().collect())
+    }
+
+    fn publication_ready(&self, _id: &str) -> AppResult<bool> {
+        Ok(true)
+    }
+    fn confirm_session(&self, _id: &str, _now_ms: i64) -> AppResult<()> {
+        Ok(())
+    }
+    fn pending_note_segment(&self) -> AppResult<Option<Segment>> {
+        Ok(None)
+    }
+
+    fn current_session_segments(&self) -> AppResult<Vec<Segment>> {
+        Ok(self.snapshot()?.active.into_iter().collect())
+    }
 
     /// 历史页查询：按开始时间倒序 + 文本模糊搜索，返回 `(当前页, 总数)`。
     fn history_segments(
@@ -208,6 +240,10 @@ pub trait TimerStore: Send + Sync {
     fn outbox_take_due(&self, now_ms: i64, limit: u32) -> AppResult<Vec<OutboxRecord>> {
         let _ = (now_ms, limit);
         Ok(Vec::new())
+    }
+
+    fn outbox_defer(&self, id: &str, due_ms: i64, now_ms: i64) -> AppResult<()> {
+        self.outbox_mark_retry(id, "插件已暂停", due_ms, now_ms)
     }
 
     fn outbox_mark_done(&self, id: &str, now_ms: i64) -> AppResult<()> {

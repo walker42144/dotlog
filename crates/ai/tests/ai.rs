@@ -2,12 +2,8 @@
 
 use std::sync::Mutex;
 
-use dotlog_ai::{
-    AiError, AiProvider, ClassifyInput, OpenAiCompatibleProvider, PrivacyMode,
-};
-use dotlog_plugin_sdk::{
-    HttpClient, HttpRequest, HttpResponse, PluginError, SegmentSnapshot,
-};
+use dotlog_ai::{AiError, AiProvider, ClassifyInput, OpenAiCompatibleProvider, PrivacyMode};
+use dotlog_plugin_sdk::{HttpClient, HttpRequest, HttpResponse, PluginError, SegmentSnapshot};
 use serde_json::json;
 
 // ---------- 测试替身 ----------
@@ -38,7 +34,10 @@ struct MockHttp {
 impl MockHttp {
     fn with_rule(url_suffix: &'static str, response: FakeResponse) -> Self {
         let http = Self::default();
-        http.rules.lock().unwrap().push(Rule { url_suffix, response });
+        http.rules.lock().unwrap().push(Rule {
+            url_suffix,
+            response,
+        });
         http
     }
 }
@@ -62,14 +61,21 @@ impl HttpClient for MockHttp {
             .iter()
             .find(|rule| request.url.ends_with(rule.url_suffix));
         match matched {
-            Some(Rule { response: FakeResponse::Http(status, body), .. }) => Ok(HttpResponse {
+            Some(Rule {
+                response: FakeResponse::Http(status, body),
+                ..
+            }) => Ok(HttpResponse {
                 status: *status,
                 body: body.as_bytes().to_vec(),
             }),
-            Some(Rule { response: FakeResponse::Network, .. }) => {
-                Err(PluginError::Network("connection refused".into()))
-            }
-            Some(Rule { response: FakeResponse::Timeout, .. }) => Err(PluginError::Timeout),
+            Some(Rule {
+                response: FakeResponse::Network,
+                ..
+            }) => Err(PluginError::Network("connection refused".into())),
+            Some(Rule {
+                response: FakeResponse::Timeout,
+                ..
+            }) => Err(PluginError::Timeout),
             None => Ok(HttpResponse {
                 status: 404,
                 body: Vec::new(),
@@ -142,7 +148,10 @@ fn privacy_off_blocks_request() {
 
 #[test]
 fn title_only_excludes_note() {
-    let http = MockHttp::with_rule("/chat/completions", FakeResponse::Http(200, chat_body("[]")));
+    let http = MockHttp::with_rule(
+        "/chat/completions",
+        FakeResponse::Http(200, chat_body("[]")),
+    );
     let input = ClassifyInput {
         segments: vec![snapshot()],
         categories: Vec::new(),
@@ -157,7 +166,10 @@ fn title_only_excludes_note() {
 
 #[test]
 fn with_note_includes_note() {
-    let http = MockHttp::with_rule("/chat/completions", FakeResponse::Http(200, chat_body("[]")));
+    let http = MockHttp::with_rule(
+        "/chat/completions",
+        FakeResponse::Http(200, chat_body("[]")),
+    );
     let input = ClassifyInput {
         segments: vec![snapshot()],
         categories: Vec::new(),
@@ -190,7 +202,10 @@ fn empty_segments_skips_request() {
 
 #[test]
 fn request_targets_chat_completions() {
-    let http = MockHttp::with_rule("/chat/completions", FakeResponse::Http(200, chat_body("[]")));
+    let http = MockHttp::with_rule(
+        "/chat/completions",
+        FakeResponse::Http(200, chat_body("[]")),
+    );
     let input = ClassifyInput {
         segments: vec![snapshot()],
         categories: vec![("cat-study".into(), "学习".into())],
@@ -204,7 +219,10 @@ fn request_targets_chat_completions() {
     };
     with_key.classify(&http, &input).unwrap();
     let captured = http.captured.lock().unwrap();
-    assert_eq!(captured[0].url, "https://api.openai.com/v1/chat/completions");
+    assert_eq!(
+        captured[0].url,
+        "https://api.openai.com/v1/chat/completions"
+    );
     assert_eq!(captured[0].authorization.as_deref(), Some("Bearer sk-test"));
 }
 
@@ -229,7 +247,10 @@ fn classify_parses_and_sanitizes_suggestions() {
     assert_eq!(first.segment_id, "seg-1");
     assert_eq!(first.title.as_deref(), Some("文献阅读：第三章"));
     // 重复与空标签被清理。
-    assert_eq!(first.tags, vec!["阅读".to_string(), "学习".to_string(), "方法".to_string()]);
+    assert_eq!(
+        first.tags,
+        vec!["阅读".to_string(), "学习".to_string(), "方法".to_string()]
+    );
     assert_eq!(first.category_id.as_deref(), Some("cat-study"));
 
     // seg-2：标题空白置空、未知分类置空。
@@ -247,7 +268,10 @@ fn snapshot_with_id(id: &str) -> SegmentSnapshot {
 #[test]
 fn classify_tolerates_code_fences() {
     let fenced = format!("```json\n{}\n```", suggestions_json());
-    let http = MockHttp::with_rule("/chat/completions", FakeResponse::Http(200, chat_body(&fenced)));
+    let http = MockHttp::with_rule(
+        "/chat/completions",
+        FakeResponse::Http(200, chat_body(&fenced)),
+    );
     let input = ClassifyInput {
         segments: vec![snapshot()],
         categories: Vec::new(),
@@ -283,7 +307,10 @@ fn classify_maps_http_and_network_errors() {
         privacy: PrivacyMode::TitleOnly,
     };
 
-    let http = MockHttp::with_rule("/chat/completions", FakeResponse::Http(401, r#"{"error":"bad key"}"#.into()));
+    let http = MockHttp::with_rule(
+        "/chat/completions",
+        FakeResponse::Http(401, r#"{"error":"bad key"}"#.into()),
+    );
     let outcome = provider().classify(&http, &input);
     assert!(matches!(outcome, Err(AiError::Http(401, _))));
 
@@ -314,4 +341,115 @@ fn provider_from_settings_falls_back_to_defaults() {
     assert_eq!(custom.base_url, "https://api.example.com/v1");
     assert_eq!(custom.model, "qwen2.5:7b");
     assert_eq!(custom.id, "custom");
+}
+
+fn review_input(privacy: PrivacyMode) -> dotlog_ai::review::ReviewInput {
+    dotlog_ai::review::ReviewInput {
+        from: "2026-10-29".into(),
+        to: "2026-10-29".into(),
+        question: "学习时间如何分配？".into(),
+        segments: vec![snapshot()],
+        privacy,
+    }
+}
+#[test]
+fn review_respects_privacy_and_returns_application_totals() {
+    for privacy in [PrivacyMode::TitleOnly, PrivacyMode::WithNote] {
+        let http = MockHttp::with_rule(
+            "/chat/completions",
+            FakeResponse::Http(200, chat_body("## 回顾\n依据记录安排复习。")),
+        );
+        let result = provider().review(&http, &review_input(privacy)).unwrap();
+        assert_eq!(result.recorded_seconds, 4320);
+        assert_eq!(result.record_count, 1);
+        let capture = http.captured.lock().unwrap();
+        let body = capture[0].body.as_ref().unwrap();
+        assert_eq!(
+            body.contains("第三章推导"),
+            privacy == PrivacyMode::WithNote
+        );
+        assert!(body.contains("学习时间如何分配"));
+        assert!(body.contains("2026-10-29"));
+        assert!(result.markdown.starts_with("## 回顾"));
+    }
+}
+#[test]
+fn review_invalid_ranges_empty_and_privacy_off_do_not_send() {
+    let http = MockHttp::default();
+    assert!(matches!(
+        provider().review(&http, &review_input(PrivacyMode::Off)),
+        Err(AiError::PrivacyOff)
+    ));
+    for (from, to) in [
+        ("2026-02-30", "2026-03-01"),
+        ("2026-10-30", "2026-10-29"),
+        ("2026-01-01", "2026-02-01"),
+        ("2026-1-1", "2026-01-01"),
+    ] {
+        let mut input = review_input(PrivacyMode::TitleOnly);
+        input.from = from.into();
+        input.to = to.into();
+        assert!(provider().review(&http, &input).is_err());
+    }
+    let mut input = review_input(PrivacyMode::TitleOnly);
+    input.segments.clear();
+    assert!(provider().review(&http, &input).is_err());
+    input.segments = vec![snapshot(); 501];
+    assert!(provider().review(&http, &input).is_err());
+    input.segments = vec![snapshot()];
+    input.question = "问".repeat(2001);
+    assert!(provider().review(&http, &input).is_err());
+    assert!(http.captured.lock().unwrap().is_empty());
+}
+#[test]
+fn review_refuses_oversized_payload_and_empty_output() {
+    let http = MockHttp::default();
+    let mut input = review_input(PrivacyMode::WithNote);
+    input.segments[0].note = "x".repeat(256 * 1024);
+    assert!(provider().review(&http, &input).is_err());
+    assert!(http.captured.lock().unwrap().is_empty());
+    let http = MockHttp::with_rule(
+        "/chat/completions",
+        FakeResponse::Http(200, chat_body("  ")),
+    );
+    assert!(matches!(
+        provider().review(&http, &review_input(PrivacyMode::TitleOnly)),
+        Err(AiError::Parse(_))
+    ));
+}
+#[test]
+fn model_list_validates_sorts_and_deduplicates_ids() {
+    let http = MockHttp::with_rule(
+        "/models",
+        FakeResponse::Http(
+            200,
+            json!({"data":[{"id":"z"},{"id":"a"},{"id":"z"},{"id":""},{}]}).to_string(),
+        ),
+    );
+    assert_eq!(provider().models(&http).unwrap(), vec!["a", "z"]);
+    let http = MockHttp::with_rule("/models", FakeResponse::Http(200, "{}".into()));
+    assert!(provider().models(&http).is_err());
+}
+#[test]
+fn classification_deduplicates_records_before_display() {
+    let row =
+        json!({"segmentId":"seg-1","title":"阅读","tags":[],"categoryId":null,"reason":"整理"});
+    let http = MockHttp::with_rule(
+        "/chat/completions",
+        FakeResponse::Http(200, chat_body(&json!([row.clone(), row]).to_string())),
+    );
+    assert_eq!(
+        provider()
+            .classify(
+                &http,
+                &ClassifyInput {
+                    segments: vec![snapshot()],
+                    categories: vec![],
+                    privacy: PrivacyMode::TitleOnly
+                }
+            )
+            .unwrap()
+            .len(),
+        1
+    );
 }

@@ -14,7 +14,9 @@ mod service;
 pub mod settings;
 pub mod stats;
 mod timefmt;
+pub mod tomatodo_link;
 
+pub use dotlog_domain::Granularity;
 pub use dto::{
     CategorySecondsView, CategoryView, DiagnosticsView, ExportPayload, ImportPreviewView,
     ImportResultView, ImportRowView, IntegrityView, RecoveryInfoView, StatsBucketView, StatsView,
@@ -23,11 +25,10 @@ pub use dto::{
 pub use error::{AppError, AppResult};
 pub use export::ExportFormat;
 pub use ports::{
-    link_state, outbox_state, CategoryRow, Clock, IntegrationLinkRow, IntegrityReport, OutboxRecord,
-    PointRecord, TimerSnapshot, TimerStore,
+    link_state, outbox_state, CategoryRow, Clock, IntegrationLinkRow, IntegrityReport,
+    OutboxRecord, PointRecord, TimerSnapshot, TimerStore,
 };
 pub use service::TimerService;
-pub use dotlog_domain::Granularity;
 
 /// 生成 UUIDv7（时间有序）。持久层负责分配，领域层只消费。
 pub fn new_id() -> String {

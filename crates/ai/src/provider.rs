@@ -65,6 +65,8 @@ pub struct ClassifyInput {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AiError {
+    #[error("请求范围无效：{0}")]
+    InvalidInput(String),
     #[error("AI 联网已关闭（隐私模式 off）")]
     PrivacyOff,
     #[error("AI 未配置：{0}")]
@@ -147,6 +149,9 @@ impl AiProvider for OpenAiCompatibleProvider {
         if input.segments.is_empty() {
             return Ok(Vec::new());
         }
+        if input.segments.len() > 200 {
+            return Err(AiError::InvalidInput("单次最多整理 200 条记录".into()));
+        }
         let user_payload = json!({
             "privacyMode": input.privacy.as_str(),
             "categories": input
@@ -169,6 +174,11 @@ impl AiProvider for OpenAiCompatibleProvider {
             ],
         });
 
+        if body.to_string().len() > 256 * 1024 {
+            return Err(AiError::InvalidInput(
+                "记录内容过多，请缩小范围或关闭发送备注".into(),
+            ));
+        }
         let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
         if let Some(key) = &self.api_key {
             headers.push(("Authorization".to_string(), format!("Bearer {key}")));
@@ -178,7 +188,9 @@ impl AiProvider for OpenAiCompatibleProvider {
             method: "POST",
             url: &url,
             headers,
-            body: Some(serde_json::to_vec(&body).map_err(|error| AiError::Parse(error.to_string()))?),
+            body: Some(
+                serde_json::to_vec(&body).map_err(|error| AiError::Parse(error.to_string()))?,
+            ),
             timeout_ms: TIMEOUT_MS,
         };
 
@@ -233,7 +245,7 @@ fn map_send_error(error: PluginError) -> AiError {
 }
 
 /// 取 `choices[0].message.content`。
-fn extract_content(body: &str) -> Result<String, AiError> {
+pub(super) fn extract_content(body: &str) -> Result<String, AiError> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|error| AiError::Parse(error.to_string()))?;
     value
@@ -266,7 +278,10 @@ fn strip_code_fences(text: &str) -> &str {
         .strip_prefix("```json")
         .or_else(|| trimmed.strip_prefix("```"))
         .unwrap_or(trimmed);
-    without_prefix.strip_suffix("```").unwrap_or(without_prefix).trim()
+    without_prefix
+        .strip_suffix("```")
+        .unwrap_or(without_prefix)
+        .trim()
 }
 
 /// 兜底：截取首个 `[` 到最后一个 `]` 之间的内容。
@@ -284,31 +299,41 @@ fn sanitize(mut list: Vec<AiSuggestion>) -> Vec<AiSuggestion> {
         suggestion.title = suggestion
             .title
             .take()
-            .map(|title| title.trim().to_string())
+            .map(|title| title.trim().chars().take(200).collect::<String>())
             .filter(|title| !title.is_empty());
         let mut tags: Vec<String> = Vec::new();
         for tag in &suggestion.tags {
-            let cleaned = tag.trim().trim_start_matches('#').trim().to_string();
+            let cleaned = tag
+                .trim()
+                .trim_start_matches('#')
+                .trim()
+                .chars()
+                .take(40)
+                .collect::<String>();
             if !cleaned.is_empty() && !tags.contains(&cleaned) {
                 tags.push(cleaned);
             }
         }
         tags.truncate(MAX_TAGS);
         suggestion.tags = tags;
+        suggestion.reason = suggestion.reason.chars().take(500).collect();
     }
     list
 }
 
 /// 过滤：只保留本次输入的段；categoryId 不在候选内时置空。
 fn filter_valid(suggestions: Vec<AiSuggestion>, input: &ClassifyInput) -> Vec<AiSuggestion> {
-    let known_categories: Vec<&str> = input
-        .categories
-        .iter()
-        .map(|(id, _)| id.as_str())
-        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let known_categories: Vec<&str> = input.categories.iter().map(|(id, _)| id.as_str()).collect();
     suggestions
         .into_iter()
-        .filter(|suggestion| input.segments.iter().any(|segment| segment.id == suggestion.segment_id))
+        .filter(|suggestion| {
+            input
+                .segments
+                .iter()
+                .any(|segment| segment.id == suggestion.segment_id)
+                && seen.insert(suggestion.segment_id.clone())
+        })
         .map(|mut suggestion| {
             let unknown = suggestion
                 .category_id

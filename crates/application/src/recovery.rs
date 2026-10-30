@@ -3,14 +3,13 @@
 //! 检测规则在 `dotlog-domain::recovery`；本模块只负责读取运行时状态、
 //! 组装事务与把领域结果映射成视图。
 
+use dotlog_domain::day_window;
 use dotlog_domain::recovery::{
     detect, resolve, RecoveryAction, RecoveryContext, RecoveryReason, RecoveryResolution,
 };
-use dotlog_domain::day_window;
 
 use crate::dto::{
-    DiagnosticsView, IntegrityView, RecoveryInfoView, StartupReport, TableCountView,
-    TimerStateView,
+    DiagnosticsView, IntegrityView, RecoveryInfoView, StartupReport, TableCountView, TimerStateView,
 };
 use crate::error::AppResult;
 use crate::ports::{Clock, TimerStore};
@@ -27,6 +26,14 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
     /// 必须在窗口展示前调用一次；返回的 `recovery` 由桌面层缓存，
     /// 因为新会话会立即覆盖心跳，之后无法再还原检测结果。
     pub fn begin_session(&self) -> AppResult<StartupReport> {
+        self.session_report(true)
+    }
+
+    pub fn check_session(&self) -> AppResult<StartupReport> {
+        self.session_report(false)
+    }
+
+    fn session_report(&self, starting: bool) -> AppResult<StartupReport> {
         let now = self.clock.now();
         let policy = self.day_policy()?;
         let (day_start, _) = day_window(now.utc_ms, now.tz_offset_min, policy.day_start_minutes);
@@ -48,16 +55,18 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
                 now_ms: now.utc_ms,
                 day_window_start_ms: day_start,
                 last_heartbeat_ms: heartbeat_ms,
-                clean_shutdown,
+                clean_shutdown: !starting || clean_shutdown,
                 ..RecoveryContext::default()
             },
         );
 
         // 从现在起本进程「未正常退出」，直到 `end_session` 或恢复处理完成。
-        self.store
-            .set_runtime_state(CLEAN_SHUTDOWN_KEY, "false", now.utc_ms)?;
-        self.store
-            .set_runtime_state(HEARTBEAT_KEY, &now.utc_ms.to_string(), now.utc_ms)?;
+        if starting {
+            self.store
+                .set_runtime_state(CLEAN_SHUTDOWN_KEY, "false", now.utc_ms)?;
+            self.store
+                .set_runtime_state(HEARTBEAT_KEY, &now.utc_ms.to_string(), now.utc_ms)?;
+        }
 
         Ok(StartupReport {
             recovery: RecoveryInfoView {
@@ -89,6 +98,7 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
         action: RecoveryAction,
         cutoff_ms: Option<i64>,
     ) -> AppResult<TimerStateView> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let at = self.clock.now();
         let state = self.load_state()?;
         let transition = resolve(
@@ -103,10 +113,15 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
         )?;
 
         if !transition.effects.is_empty() {
-            self.store.commit(&transition.effects, at.utc_ms)?;
+            self.commit_link_closure(
+                &transition.effects,
+                state.active.as_ref().map(|s| s.id.as_str()),
+                action != RecoveryAction::Discard,
+                at,
+            )?;
         }
         self.store
-            .set_runtime_state(CLEAN_SHUTDOWN_KEY, "true", at.utc_ms)?;
+            .set_runtime_state(CLEAN_SHUTDOWN_KEY, "false", at.utc_ms)?;
         self.store
             .set_runtime_state(HEARTBEAT_KEY, &at.utc_ms.to_string(), at.utc_ms)?;
 

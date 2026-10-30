@@ -95,11 +95,12 @@ export function Timeline({
   const nextById = buildNextMap(day);
   const segmentCount = day?.segments.length ?? 0;
   const activeSegment = day?.segments.find((segment) => segment.status === "active") ?? null;
-  // 日视图拉取后计时仍在增长：用本地秒表替换进行中段的时长。
+  const activeElapsed = activeSegment && day ? Math.min(elapsed, Math.max(0, Math.floor((Math.min(Date.now(), day.windowEnd) - Math.max(activeSegment.startAt, day.windowStart)) / 1000))) : 0;
+  // The headline uses this slice, while the main timer accumulates the whole session.
   const liveRecorded =
     (day?.stats.recordedSeconds ?? 0) -
     (activeSegment?.durationSeconds ?? 0) +
-    (activeSegment ? elapsed : 0);
+    activeElapsed;
 
   return (
     <section aria-label="今日时间线">
@@ -124,7 +125,7 @@ export function Timeline({
                     <time>{formatTime(row.segment.startAt)}</time>
                     <SegmentRow
                       segment={row.segment}
-                      elapsed={elapsed}
+                      elapsed={activeElapsed}
                       onEdit={() => onEditSegment(row.segment, nextById.get(row.segment.id) ?? null)}
                     />
                   </li>

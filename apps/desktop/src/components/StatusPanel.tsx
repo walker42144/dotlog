@@ -28,27 +28,27 @@ export function StatusPanel({
   const modeLabel = state?.mode === "chain" ? "连续打点" : "打点即停";
 
   const hint = recording
-    ? `本次开始于 ${formatTime(active.startAt)}`
+    ? `本次开始于 ${formatTime(state?.sessionStartedAt ?? active.startAt)}`
     : paused
-      ? "上一段已关闭，继续会开启新的一段"
+      ? "计时已冻结，继续后累计；暂停时间不计入时长"
       : state
         ? "点击开始，记录此刻"
         : "正在读取本地数据…";
 
   return (
-    <section className="status-card" aria-label="当前记录状态">
+    <section className="status-card" data-phase={tone} aria-label="当前记录状态">
       <div>
         <div className="status-card__meta">
           <span className={`status-dot status-dot--${tone}`} />
-          <span className="status-card__label">{label}</span>
+          <span className="status-card__label" key={tone}>{label}</span>
           <span className="status-card__hint">{hint}</span>
         </div>
 
         <div className="status-card__elapsed">
-          {recording ? (
+          {recording || paused ? (
             <>
               <span className="elapsed">{formatClock(elapsed)}</span>
-              <span className="elapsed__unit">已记录</span>
+              <span className="elapsed__unit">{paused ? "已暂停 · 累计" : "实际记录"}</span>
             </>
           ) : (
             <span className="elapsed elapsed--idle">{paused ? "已暂停" : "尚未开始"}</span>
@@ -57,7 +57,7 @@ export function StatusPanel({
 
         <p className="status-card__sub">
           {recording
-            ? `本次从 ${formatTime(active.startAt)} 开始 · ${modeLabel}`
+            ? `本次从 ${formatTime(state?.sessionStartedAt ?? active.startAt)} 开始 · ${modeLabel}`
             : `记录模式：${modeLabel}`}
         </p>
       </div>
@@ -73,18 +73,18 @@ export function StatusPanel({
           {recording ? "打点" : paused ? "继续" : "开始打点"}
         </button>
 
-        {recording ? (
+        {recording || paused ? (
           <div className="secondary-row">
-            <button className="ghost-btn" type="button" disabled={pending} onClick={onPause}>
+            {recording && <button className="ghost-btn" type="button" disabled={pending} onClick={onPause}>
               暂停
-            </button>
+            </button>}
             <button className="ghost-btn" type="button" disabled={pending} onClick={onFinish}>
               结束记录
             </button>
           </div>
         ) : (
           <div className="kbd-hint">
-            快捷键 <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Space</kbd>
+            全局快捷键可在设置中查看
           </div>
         )}
       </div>

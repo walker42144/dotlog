@@ -8,6 +8,7 @@ description = "DotLog Memos 集成插件：段关闭后经 outbox 单向发布�
 [dependencies]
 dotlog-plugin-sdk = { path = "../plugin-sdk" }
 serde_json.workspace = true
+serde.workspace = true
 # 本地时刻格式化（发布内容中的起止时间）。
 chrono.workspace = true
 

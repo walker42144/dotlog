@@ -40,6 +40,7 @@ export interface TimerState {
   phase: Phase;
   active: SegmentView | null;
   elapsedSeconds: number;
+  sessionStartedAt?: number | null;
   mode: PunchMode;
   paused: boolean;
 }
@@ -90,6 +91,10 @@ export interface UndoResult {
 }
 
 export interface SegmentPatch {
+  categoryId?: string | null;
+  isFocus?: boolean;
+  isIgnored?: boolean;
+  tags?: string[];
   title?: string;
   note?: string;
   startAt?: number;
@@ -97,6 +102,9 @@ export interface SegmentPatch {
 }
 
 export interface BackfillInput {
+  categoryId?: string | null;
+  isFocus?: boolean;
+  isIgnored?: boolean;
   startAt: number;
   endAt: number;
   title?: string;
@@ -191,11 +199,15 @@ export type IntegrationCapability =
   | "ui:panel"
   | "secret:store";
 
+export interface Memo { name: string; content: string; visibility: string; createTime: string }
+export interface MemoPage { user: string; userId: string; instanceUrl: string; memos: Memo[]; nextPageToken: string | null; apiVersion: string }
+
 export interface IntegrationView {
   id: string;
   name: string;
   version: string;
   enabled: boolean;
+  installed?: boolean;
   configured: boolean;
   capabilities: IntegrationCapability[];
   lastError: string | null;
@@ -218,11 +230,17 @@ export interface OutboxView {
 
 /** AI 分类建议；只存在于内存，确认后才落库（plugin-sdk §8.2）。 */
 export interface AiSuggestion {
+  revision: number;
+  original?: SegmentView;
   segmentId: string;
   title: string | null;
   tags: string[];
   categoryId: string | null;
   reason: string;
+}
+
+export interface AiReviewResult {
+  markdown: string; recordCount: number; recordedSeconds: number; from: string; to: string; model: string;
 }
 
 export interface IntegrationTestResult {
@@ -381,6 +399,9 @@ export const ipc = {
   undo: () => call<UndoResult>("timer_undo"),
   dayToday: () => call<DayView>("day_today"),
   dayGet: (date: string) => call<DayView>("day_get", { date }),
+  getPendingNote: () => call<SegmentView | null>("pending_note_get"),
+  confirmSession: (id: string) => call<void>("segment_confirm", { id }),
+  segmentGet: (id: string) => call<SegmentView>("segment_get", { id }),
   updateSegment: (id: string, revision: number, patch: SegmentPatch) =>
     call<SegmentView>("segment_update", { id, revision, patch }),
   backfillSegment: (input: BackfillInput) => call<SegmentView>("segment_backfill", { input }),
@@ -407,6 +428,7 @@ export const ipc = {
     call<ExportResult>("export_data", { format, from, to, path: path ?? null }),
   importPreview: (content: string) => call<ImportPreview>("import_preview", { content }),
   importCommit: (content: string) => call<ImportResult>("import_commit", { content }),
+  dataOpenFolder: (kind: "data" | "backups" | "exports" | "restore-safety") => IS_TAURI ? call<void>("data_open_folder", { kind }) : Promise.resolve(),
   backupNow: () => call<BackupEntry>("backup_now"),
   backupList: () => call<BackupEntry[]>("backup_list"),
   backupRestore: (path: string) => call<void>("backup_restore", { path }),
@@ -415,6 +437,11 @@ export const ipc = {
     call<TimerState>("recovery_resolve", { action }),
   diagnosticsSnapshot: () => call<DiagnosticsSnapshot>("diagnostics_snapshot"),
   integrationList: () => call<IntegrationView[]>("integration_list"),
+  memosBrowse: (pageToken?: string) => call<MemoPage>("memos_browse", { pageToken: pageToken ?? null }),
+  memosSave: (content: string, visibility: string, name?: string) => call<Memo>("memos_save", { content, visibility, name: name ?? null }),
+  memosDelete: (name: string) => call<void>("memos_delete", { name }),
+  integrationSetInstalled: (id: string, installed: boolean) =>
+    call<IntegrationView>("integration_set_installed", { id, installed }),
   integrationSetEnabled: (id: string, enabled: boolean) =>
     call<IntegrationView>("integration_set_enabled", { id, enabled }),
   integrationConfigSet: (id: string, config: Record<string, unknown>) =>
@@ -425,6 +452,8 @@ export const ipc = {
   outboxList: (state?: OutboxState) => call<OutboxView[]>("outbox_list", { state: state ?? null }),
   outboxRetry: (id: string) => call<OutboxView>("outbox_retry", { id }),
   aiSuggest: (date?: string) => call<AiSuggestion[]>("ai_suggest", { date: date ?? null }),
+  aiModels: () => call<string[]>("ai_models"),
+  aiReview: (input: {from:string;to:string;question:string}) => call<AiReviewResult>("ai_review", {input}),
   aiApply: (input: AiApplyInput) => call<SegmentView>("ai_apply", { input }),
   tomatodoScan: () => call<TomatodoScanResult>("tomatodo_scan"),
   tomatodoImport: () => call<TomatodoImportResult>("tomatodo_import"),
@@ -435,7 +464,7 @@ export const ipc = {
 export function friendlyMessage(error: IpcError): string {
   switch (error.code) {
     case "E_INVALID_RANGE":
-      return "这次打点间隔太短，请稍等几秒再试";
+      return error.message || "时间范围不合法，请检查起止时间";
     case "E_NOT_RECORDING":
       return "当前没有进行中的记录";
     case "E_ACTIVE_EXISTS":
@@ -463,7 +492,7 @@ export function friendlyMessage(error: IpcError): string {
     case "E_BACKUP_FAILED":
       return "备份失败，请稍后重试";
     case "E_RESTORE_INVALID":
-      return "备份文件不可用，当前数据未受影响";
+      return error.message || "备份文件不可用，恢复已取消";
     case "E_CLOCK_ANOMALY":
       return "系统时间似乎发生了变化，请先确认进行中的记录";
     case "E_DB_CORRUPT":
@@ -490,12 +519,15 @@ interface MockPoint {
   segmentId?: string;
   undone: boolean;
   edit?: MockEditUndo;
+  pausedFinish?: boolean;
 }
 
 let mockActive: SegmentView | null = null;
 let mockClosed: SegmentView[] = [];
 let mockPoints: MockPoint[] = [];
 let mockPaused = false;
+let mockSessionIds: string[] = [];
+const mockSessionGroups: Record<string, string[]> = {};
 let mockCounter = 0;
 
 const UNDO_WINDOW_MS = 15_000;
@@ -514,6 +546,7 @@ const DEFAULT_SETTINGS: SettingsMap = {
   "notify.on_punch": true,
   "launch.at_login": false,
   "ui.theme": "system",
+  "ui.motion": "system",
   "backup.enabled": true,
   "backup.keep_daily": 7,
   "backup.keep_weekly": 4,
@@ -659,14 +692,14 @@ function mockSegment(startAt: number): SegmentView {
 
 function mockState(): TimerState {
   const active = mockActive;
-  const elapsedSeconds = active
-    ? Math.max(0, Math.floor((Date.now() - active.startAt) / 1000))
-    : 0;
+  const session = [...mockClosed, ...(active ? [active] : [])].filter((s) => mockSessionIds.includes(s.id));
+  const elapsedSeconds = session.reduce((sum, s) => sum + Math.max(0, Math.floor(((s.endAt ?? Date.now()) - s.startAt) / 1000)), 0);
   return {
     phase: active ? "recording" : "idle",
     active: active ? { ...active, durationSeconds: elapsedSeconds } : null,
     elapsedSeconds,
-    mode: "stop",
+    sessionStartedAt: session.length ? Math.min(...session.map((s) => s.startAt)) : null,
+    mode: mockSettings["punch.mode"] === "chain" ? "chain" : "stop",
     paused: mockPaused
   };
 }
@@ -695,8 +728,10 @@ function mockClose(at = Date.now()): SegmentView {
 }
 
 function mockResult(closed: SegmentView): PunchResult {
+  const slices = mockClosed.filter((s) => (mockSessionGroups[closed.id] ?? [closed.id]).includes(s.id));
+  const logicalClosed = { ...closed, startAt: Math.min(closed.startAt, ...slices.map((s) => s.startAt)), durationSeconds: slices.reduce((sum, s) => sum + s.durationSeconds, 0) || closed.durationSeconds };
   return {
-    closedSegment: closed,
+    closedSegment: logicalClosed,
     newSegment: null,
     pendingNote: {
       segmentId: closed.id,
@@ -704,7 +739,7 @@ function mockResult(closed: SegmentView): PunchResult {
       endAt: closed.endAt ?? closed.startAt
     },
     undoToken: `preview-${closed.id}`,
-    shortSegment: closed.durationSeconds < 15
+    shortSegment: closed.durationSeconds * 1000 < Number(mockSettings["punch.short_segment_ms"] ?? 15_000)
   };
 }
 
@@ -719,15 +754,20 @@ function lastLivePoint(): MockPoint | null {
 function mockUndo(): UndoResult {
   const point = lastLivePoint();
   if (!point) throw makeError("E_UNDO_UNAVAILABLE", "没有可撤销的操作");
-  if (Date.now() - point.at > UNDO_WINDOW_MS) {
+  if (Date.now() - point.at > Number(mockSettings["punch.undo_window_ms"] ?? UNDO_WINDOW_MS)) {
     throw makeError("E_UNDO_EXPIRED", "撤销窗口已过");
   }
 
   point.undone = true;
+  if (point.pausedFinish && point.segmentId) {
+    mockSessionIds = mockSessionGroups[point.segmentId] ?? [point.segmentId]; mockPaused = true;
+    return { restoredSegment: null, removedSegmentId: null };
+  }
   if (point.kind === "start" || point.kind === "resume") {
     const removed = mockActive?.id ?? null;
     mockActive = null;
-    mockPaused = false;
+    mockPaused = point.kind === "resume";
+    mockSessionIds = mockPaused ? (mockSessionGroups[point.segmentId ?? ""] ?? []).filter((id) => id !== removed) : [];
     return { restoredSegment: null, removedSegmentId: removed };
   }
 
@@ -763,6 +803,7 @@ function mockUndo(): UndoResult {
   const stored = mockClosed.find((segment) => segment.id === id);
   if (!stored) throw makeError("E_UNDO_UNAVAILABLE", "记录已不存在");
 
+  mockSessionIds = mockSessionGroups[id] ?? [id];
   mockClosed = mockClosed.filter((segment) => segment.id !== id);
   mockActive = {
     ...stored,
@@ -774,12 +815,13 @@ function mockUndo(): UndoResult {
   return { restoredSegment: mockActive, removedSegmentId: null };
 }
 
-function mockDay(): DayView {
+function mockDay(requestedDate?: string): DayView {
   const now = Date.now();
+  const reference = requestedDate ? new Date(`${requestedDate}T12:00:00`).getTime() : now;
   const tzOffsetMin = -new Date().getTimezoneOffset();
   const tzMs = tzOffsetMin * 60_000;
   const dayStartMs = DAY_START_MINUTES * 60_000;
-  const dayIndex = Math.floor((now + tzMs - dayStartMs) / DAY_MS);
+  const dayIndex = Math.floor((reference + tzMs - dayStartMs) / DAY_MS);
   const windowStart = dayIndex * DAY_MS + dayStartMs - tzMs;
   const windowEnd = windowStart + DAY_MS;
   const statsEnd = Math.min(windowEnd, Math.max(windowStart, now));
@@ -890,6 +932,11 @@ function mockUpdateSegment(args?: Record<string, unknown>): SegmentView {
         : Math.floor((Date.now() - newStart) / 1000),
     revision: target.revision + 1
   };
+  if (patch.categoryId !== undefined) updated.category = MOCK_CATEGORIES.find((c) => c.id === patch.categoryId) ?? null;
+  if (patch.isFocus !== undefined) updated.isFocus = patch.isFocus;
+  if (patch.isIgnored !== undefined) updated.isIgnored = patch.isIgnored;
+  if (patch.tags !== undefined) updated.tags = patch.tags.map((name) => ({ id: name, name, color: null }));
+
 
   if (mockActive?.id === id) {
     mockActive = updated;
@@ -1132,7 +1179,7 @@ function mockSettingsGet(args?: Record<string, unknown>): SettingsMap {
   const scope = args?.scope;
   if (typeof scope === "string") {
     const id = scope.startsWith("plugin:") ? scope.slice("plugin:".length) : null;
-    if (id === null) return {};
+    if (id === null) return scope === "app" ? { ...mockSettings } : {};
     return { ...(mockPluginConfig[id] ?? {}) };
   }
   return { ...mockSettings };
@@ -1377,6 +1424,8 @@ function mockDiagnostics(): DiagnosticsSnapshot {
 // ---- M5 集成（浏览器走查模拟） ----
 
 /** 插件设置（scope `plugin:<id>`）。 */
+let mockMemos: Memo[] = [];
+
 const mockPluginConfig: Record<string, Record<string, unknown>> = {
   memos: { instanceUrl: "https://memos.example.com", apiVersion: "v0.24" },
   ai: {
@@ -1479,6 +1528,7 @@ function mockIntegrationView(id: string): IntegrationView {
     id: meta.id,
     name: meta.name,
     version: meta.version,
+    installed: config.installed !== false,
     enabled: mockEnabled[id] ?? false,
     configured,
     capabilities: meta.capabilities,
@@ -1525,12 +1575,13 @@ function mockIntegrationTest(id: string): IntegrationTestResult {
   };
 }
 
-function mockAiSuggest(): AiSuggestion[] {
+function mockAiSuggest(date?: string): AiSuggestion[] {
   if (!(mockEnabled.ai ?? false)) {
     throw makeError("E_PLUGIN_DISABLED", "AI 助手未启用");
   }
+  const range=dayWindowOf(new Date(`${date||dayKeyOf(Date.now())}T12:00:00`));
   const candidates = mockAllSegments()
-    .filter((segment) => !segment.isIgnored && segment.status === "closed")
+    .filter((segment) => !segment.isIgnored && segment.status === "closed" && segment.startAt<range.to && (segment.endAt??0)>range.from)
     .sort((left, right) => right.startAt - left.startAt)
     .slice(0, 4);
   if (candidates.length === 0) return [];
@@ -1539,6 +1590,7 @@ function mockAiSuggest(): AiSuggestion[] {
     const base = segment.title || "未命名记录";
     return {
       segmentId: segment.id,
+      revision: segment.revision,
       title: base.length <= 12 ? base : base.slice(0, 12),
       tags: index % 2 === 0 ? ["专注", "复盘"] : ["碎片"],
       categoryId: segment.category === null ? category.id : segment.category.id,
@@ -1585,35 +1637,36 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
       return mockState() as T;
     case "timer_start": {
       if (mockActive) throw makeError("E_ACTIVE_EXISTS", "已存在进行中的记录");
-      const at = Date.now();
-      mockActive = mockSegment(at);
-      mockPaused = false;
-      pushPoint("start", at, mockActive.id);
+      const at = Date.now(); const resuming = mockPaused;
+      if (!resuming) mockSessionIds = [];
+      mockActive = mockSegment(at); mockSessionIds.push(mockActive.id); mockSessionGroups[mockActive.id] = mockSessionIds;
+      mockPaused = false; pushPoint(resuming ? "resume" : "start", at, mockActive.id);
       return mockState() as T;
     }
     case "timer_punch": {
-      const closed = mockClose();
-      mockPaused = false;
+      const closed = mockClose(); mockPaused = false;
       pushPoint("punch", closed.endAt ?? Date.now(), closed.id);
-      return mockResult(closed) as T;
+      const result = mockResult(closed); mockSessionIds = [];
+      if (mockSettings["punch.mode"] === "chain") { mockActive = mockSegment(closed.endAt ?? Date.now()); mockSessionIds.push(mockActive.id); mockSessionGroups[mockActive.id] = mockSessionIds; }
+      return { ...result, newSegment: mockActive } as T;
     }
     case "timer_pause": {
-      const closed = mockClose();
-      mockPaused = true;
+      const closed = mockClose(); mockPaused = true;
       pushPoint("pause", closed.endAt ?? Date.now(), closed.id);
-      return mockResult(closed) as T;
+      return { ...mockResult(closed), pendingNote: null } as T;
     }
     case "timer_finish": {
-      const closed = mockClose();
-      mockPaused = false;
-      pushPoint("finish", closed.endAt ?? Date.now(), closed.id);
-      return mockResult(closed) as T;
+      const wasPaused = mockPaused;
+      const closed = wasPaused ? mockClosed.find((s) => s.id === mockSessionIds[mockSessionIds.length - 1]) : mockClose();
+      if (!closed) throw makeError("E_NOT_RECORDING", "没有可结束的记录");
+      mockPaused = false; pushPoint("finish", Date.now(), closed.id);
+      mockPoints[mockPoints.length - 1].pausedFinish = wasPaused;
+      const result = mockResult(closed); mockSessionIds = []; return result as T;
     }
     case "timer_undo":
       return mockUndo() as T;
-    case "day_today":
-    case "day_get":
-      return mockDay() as T;
+    case "day_today": return mockDay() as T;
+    case "day_get": return mockDay(String(args?.date ?? "")) as T;
     case "segment_update":
       return mockUpdateSegment(args) as T;
     case "segment_backfill":
@@ -1657,8 +1710,31 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
       return mockResolveRecovery((args?.action ?? "extend") as RecoveryAction) as T;
     case "diagnostics_snapshot":
       return mockDiagnostics() as T;
+    case "pending_note_get": return null as T;
+    case "segment_confirm": return undefined as T;
+    case "segment_get": {
+      const segment = [mockActive, ...mockClosed].find((s) => s?.id === args?.id);
+      if (!segment) throw makeError("E_SEGMENT_NOT_FOUND", "记录不存在");
+      return segment as T;
+    }
+    case "memos_browse":
+      if (!mockEnabled.memos || mockPluginConfig.memos?.installed === false) throw makeError("E_PLUGIN_DISABLED", "请先添加并启用 Memos 插件");
+      return { user: "预览用户", userId: "users/preview", instanceUrl: mockPluginConfig.memos?.instanceUrl ?? "", memos: mockMemos, nextPageToken: null, apiVersion: "v1" } as T;
+    case "memos_save": {
+      const name = String(args?.name ?? `memos/preview-${Date.now()}`);
+      const memo: Memo = { name, content: String(args?.content ?? ""), visibility: String(args?.visibility ?? "PRIVATE"), createTime: new Date().toISOString() };
+      mockMemos = [memo, ...mockMemos.filter((m) => m.name !== name)];
+      return memo as T;
+    }
+    case "memos_delete":
+      mockMemos = mockMemos.filter((m) => m.name !== args?.name); return undefined as T;
     case "integration_list":
       return INTEGRATION_META.map((meta) => mockIntegrationView(meta.id)) as T;
+    case "integration_set_installed": {
+      const id = String(args?.id ?? "");
+      mockPluginConfig[id] = { ...(mockPluginConfig[id] ?? {}), installed: Boolean(args?.installed) };
+      return mockIntegrationSetEnabled({ id, enabled: false }) as T;
+    }
     case "integration_set_enabled":
       return mockIntegrationSetEnabled(args) as T;
     case "integration_config_set":
@@ -1690,7 +1766,14 @@ async function mockCall<T>(command: string, args?: Record<string, unknown>): Pro
       return { ...row } as T;
     }
     case "ai_suggest":
-      return mockAiSuggest() as T;
+      return mockAiSuggest(args?.date ? String(args.date) : undefined) as T;
+    case "ai_models": return ["演示模型", "qwen2.5:7b"] as T;
+    case "ai_review": {
+      const input=args?.input as {from:string;to:string;question:string};
+      const day=mockDay(input.to);
+      return {from:input.from,to:input.to,recordCount:day.segments.length,recordedSeconds:day.stats.recordedSeconds,model:"演示模型",
+        markdown:"## 本期概览\n这是浏览器模拟复盘，用于检查界面，不是真实模型分析。\n\n## 时间分配\n所选记录包含英语精读和工作活动。\n\n## 下一步建议\n- 给学习段补充具体章节。\n- 结合当天记录安排下一次复盘。"} as T;
+    }
     case "ai_apply":
       return mockAiApply(args) as T;
     case "tomatodo_scan":

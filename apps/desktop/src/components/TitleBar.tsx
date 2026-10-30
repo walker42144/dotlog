@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
 import { windowControls } from "../lib/window";
 import {
-  ChevronLeftIcon,
-  ChevronRightIcon,
   CloseIcon,
   ExitFullscreenIcon,
   FullscreenIcon,
@@ -31,16 +29,17 @@ export function TitleBar({
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    windowControls.isFullscreen().then(setFullscreen);
+    let disposed = false;
+    windowControls.isFullscreen().then((v) => { if (!disposed) setFullscreen(v); }).catch(() => {});
     windowControls.onFullscreenChange((value) => setFullscreen(value)).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+      if (disposed) fn?.(); else unlisten = fn;
+    }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   // 不乐观更新：调用失败时图标保持原样，成功时由 resize 回调同步真实状态。
   const toggleFullscreen = () => {
-    void windowControls.setFullscreen(!fullscreen);
+    void windowControls.setFullscreen(!fullscreen).catch(() => {});
   };
 
   return (
@@ -53,13 +52,8 @@ export function TitleBar({
 
       <div className="titlebar__center" data-tauri-drag-region>
         <div className="date-nav">
-          <button className="date-nav__btn" type="button" disabled title="跨日浏览随后续版本提供">
-            <ChevronLeftIcon size={16} />
-          </button>
           <span className="date-nav__label">{dateLabel}</span>
-          <button className="date-nav__btn" type="button" disabled title="跨日浏览随后续版本提供">
-            <ChevronRightIcon size={16} />
-          </button>
+
         </div>
       </div>
 

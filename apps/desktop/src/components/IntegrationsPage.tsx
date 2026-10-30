@@ -1,22 +1,21 @@
+import { LocalPluginManager } from "./LocalPluginManager";
+import { pluginsChanged } from "../lib/plugins";
 import { useCallback, useEffect, useState } from "react";
+import "../styles/plugin-manager.css";
 import { listen } from "@tauri-apps/api/event";
 import {
   friendlyMessage,
   ipc,
   IS_TAURI,
   toIpcError,
-  type AiSuggestion,
   type IntegrationCapability,
   type IntegrationView,
   type OutboxState,
   type OutboxView,
-  type SegmentView,
-  type SettingsMap,
-  type TomatodoAnalysis,
-  type TomatodoCompareResult,
-  type TomatodoImportResult,
-  type TomatodoScanResult
+  type SettingsMap
 } from "../lib/ipc";
+
+const integrationName = (card: IntegrationView) => card.id === "tomatodo" ? "历史导入与对比" : card.name;
 
 /** 同步状态事件（ipc-contract §4）。 */
 const INTEGRATION_EVENT = "integration://status";
@@ -39,7 +38,7 @@ const OUTBOX_STATE_LABEL: Record<OutboxState, string> = {
 
 const PRIVACY_LABEL: Record<string, string> = {
   off: "不联网",
-  title_only: "仅标题与时间",
+  title_only: "标题、时间与分类标签",
   with_note: "含备注全文"
 };
 
@@ -72,15 +71,14 @@ const readText = (settings: SettingsMap, key: string): string => {
 interface IntegrationsPageProps {
   onNotify: (message: string, tone?: "info" | "error") => void;
   onDataChanged: () => void;
+  focusPlugin?: string;
+  embedded?: boolean;
 }
 
-interface SuggestionRow {
-  suggestion: AiSuggestion;
-  segment: SegmentView;
-}
 
-export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPageProps) {
+export function IntegrationsPage({ onNotify, focusPlugin, embedded = false }: IntegrationsPageProps) {
   const [cards, setCards] = useState<IntegrationView[] | null>(null);
+  const [catalogOpen, setCatalogOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -95,21 +93,15 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
   const [aiBaseUrl, setAiBaseUrl] = useState("");
   const [aiModel, setAiModel] = useState("");
   const [aiKey, setAiKey] = useState("");
+  const [aiModels, setAiModels] = useState<string[]>([]);
   const [aiPrivacy, setAiPrivacy] = useState("title_only");
 
   const [outbox, setOutbox] = useState<OutboxView[]>([]);
   const [outboxFilter, setOutboxFilter] = useState<"all" | OutboxState>("all");
 
   const [confirmEnable, setConfirmEnable] = useState<IntegrationView | null>(null);
-  const [suggestions, setSuggestions] = useState<SuggestionRow[]>([]);
-  const [aiBusy, setAiBusy] = useState(false);
 
   // 番茄Todo
-  const [tomatodoScan, setTomatodoScan] = useState<TomatodoScanResult | null>(null);
-  const [tomatodoImport, setTomatodoImport] = useState<TomatodoImportResult | null>(null);
-  const [tomatodoCompare, setTomatodoCompare] = useState<TomatodoCompareResult | null>(null);
-  const [tomatodoAnalysis, setTomatodoAnalysis] = useState<TomatodoAnalysis[] | null>(null);
-  const [tomatodoBusy, setTomatodoBusy] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
     try {
@@ -172,8 +164,9 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
       setBusy(`${card.id}-enabled`);
       try {
         const view = await ipc.integrationSetEnabled(card.id, next);
+      pluginsChanged();
         setCards((current) => current?.map((item) => (item.id === view.id ? view : item)) ?? current);
-        onNotify(next ? `已启用 ${view.name}` : `已停用 ${view.name}`);
+        onNotify(next ? `已启用 ${integrationName(view)}` : `已停用 ${integrationName(view)}`);
       } catch (reason) {
         onNotify(friendlyMessage(toIpcError(reason)), "error");
       } finally {
@@ -190,8 +183,9 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
     setBusy(`${card.id}-enabled`);
     try {
       const view = await ipc.integrationSetEnabled(card.id, true);
+      pluginsChanged();
       setCards((current) => current?.map((item) => (item.id === view.id ? view : item)) ?? current);
-      onNotify(`已启用 ${view.name}`);
+      onNotify(`已启用 ${integrationName(view)}`);
     } catch (reason) {
       onNotify(friendlyMessage(toIpcError(reason)), "error");
     } finally {
@@ -229,6 +223,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
           setCards((current) => current?.map((item) => (item.id === view.id ? view : item)) ?? current);
           setAiKey("");
         }
+        pluginsChanged();
         onNotify("配置已保存");
       } catch (reason) {
         onNotify(friendlyMessage(toIpcError(reason)), "error");
@@ -238,6 +233,12 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
     },
     [aiBaseUrl, aiKey, aiModel, aiPrivacy, aiProvider, memosAutoPublish, memosIncludeNote, memosTagRules, memosToken, memosUrl, memosVisibility, onNotify]
   );
+
+  const loadAiModels = async () => {
+    setBusy("ai-models");
+    try { const models=await ipc.aiModels(); setAiModels(models); if(!models.length)onNotify("服务未列出模型，可手动填写模型 ID"); }
+    catch(e){onNotify(friendlyMessage(toIpcError(e)),"error");} finally {setBusy(null);}
+  };
 
   const testConnection = useCallback(
     async (id: string) => {
@@ -272,125 +273,29 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
     [onNotify]
   );
 
-  const loadSuggestions = useCallback(async () => {
-    setAiBusy(true);
-    try {
-      const [list, day] = await Promise.all([ipc.aiSuggest(), ipc.dayToday()]);
-      const byId = new Map(day.segments.map((segment) => [segment.id, segment]));
-      setSuggestions(
-        list
-          .map((suggestion) => {
-            const segment = byId.get(suggestion.segmentId);
-            return segment ? { suggestion, segment } : null;
-          })
-          .filter((row): row is SuggestionRow => row !== null)
-      );
-      if (list.length === 0) onNotify("今天的记录都整理好了");
-    } catch (reason) {
-      onNotify(friendlyMessage(toIpcError(reason)), "error");
-    } finally {
-      setAiBusy(false);
-    }
-  }, [onNotify]);
-
-  const applySuggestion = useCallback(
-    async (row: SuggestionRow) => {
-      const { suggestion, segment } = row;
-      setBusy(`ai-${suggestion.segmentId}`);
-      try {
-        await ipc.aiApply({
-          segmentId: suggestion.segmentId,
-          revision: segment.revision,
-          title: suggestion.title ?? undefined,
-          categoryId: suggestion.categoryId ?? undefined,
-          tags: suggestion.tags
-        });
-        setSuggestions((current) => current.filter((item) => item.suggestion.segmentId !== suggestion.segmentId));
-        onNotify("建议已应用");
-        onDataChanged();
-      } catch (reason) {
-        onNotify(friendlyMessage(toIpcError(reason)), "error");
-      } finally {
-        setBusy(null);
-      }
-    },
-    [onDataChanged, onNotify]
-  );
-
-  // ---------- 番茄Todo 操作 ----------
-
-  const scanTomatodo = useCallback(async () => {
-    setTomatodoBusy("scan");
-    try {
-      const result = await ipc.tomatodoScan();
-      setTomatodoScan(result);
-      onNotify(`扫描完成：${result.completedRecords} 条专注记录，共 ${result.totalMinutes} 分钟`);
-    } catch (reason) {
-      onNotify(friendlyMessage(toIpcError(reason)), "error");
-    } finally {
-      setTomatodoBusy(null);
-    }
-  }, [onNotify]);
-
-  const importTomatodo = useCallback(async () => {
-    setTomatodoBusy("import");
-    try {
-      const result = await ipc.tomatodoImport();
-      setTomatodoImport(result);
-      const parts = [
-        `导入 ${result.imported} 条`,
-        result.skippedExisting > 0 ? `跳过 ${result.skippedExisting} 条已导入` : "",
-        result.skippedIncomplete > 0 ? `忽略 ${result.skippedIncomplete} 条未完成` : "",
-        result.conflicts > 0 ? `冲突 ${result.conflicts} 条` : ""
-      ].filter(Boolean);
-      onNotify(parts.join("，"));
-      onDataChanged();
-    } catch (reason) {
-      onNotify(friendlyMessage(toIpcError(reason)), "error");
-    } finally {
-      setTomatodoBusy(null);
-    }
-  }, [onDataChanged, onNotify]);
-
-  const compareTomatodo = useCallback(async () => {
-    setTomatodoBusy("compare");
-    try {
-      const result = await ipc.tomatodoCompare();
-      setTomatodoCompare(result);
-      onNotify(
-        `对比完成：匹配 ${result.summary.matchedPairs} 对，DotLog 缺 ${result.summary.missingInDotlog} 条，多 ${result.summary.extraInDotlog} 条`
-      );
-    } catch (reason) {
-      onNotify(friendlyMessage(toIpcError(reason)), "error");
-    } finally {
-      setTomatodoBusy(null);
-    }
-  }, [onNotify]);
-
-  const analyzeTomatodo = useCallback(async () => {
-    setTomatodoBusy("analyze");
-    try {
-      const result = await ipc.tomatodoAnalyze();
-      setTomatodoAnalysis(result);
-      onNotify(`智能分析完成：${result.length} 条建议`);
-    } catch (reason) {
-      onNotify(friendlyMessage(toIpcError(reason)), "error");
-    } finally {
-      setTomatodoBusy(null);
-    }
-  }, [onNotify]);
-
   if (cards === null) {
     return (
-      <div className="settings-page">
-        <header className="page-head">
+      <div className={embedded ? "integration-embedded" : "settings-page"}>
+        {!embedded && <header className="page-head">
           <h1>集成</h1>
           <p>{loadError ?? "读取中…"}</p>
-        </header>
+        </header>}
       </div>
     );
   }
 
+  const installed = cards.filter((card) => card.id !== "tomatodo" && card.installed !== false && (!focusPlugin || card.id === focusPlugin));
+  const available = cards.filter((card) => card.id !== "tomatodo" && card.installed === false);
+  const changeInstallation = async (card: IntegrationView, value: boolean) => {
+    setBusy(`${card.id}-installed`);
+    try {
+      const view = await ipc.integrationSetInstalled(card.id, value);
+      pluginsChanged();
+      setCards((current) => current?.map((item) => item.id === view.id ? view : item) ?? current);
+      onNotify(value ? `已添加 ${integrationName(card)}，启用后开始工作` : `已移除 ${integrationName(card)}，配置和本地记录已保留`);
+    } catch (e) { onNotify(friendlyMessage(toIpcError(e)), "error"); }
+    finally { setBusy(null); }
+  };
   const visibleOutbox = outboxFilter === "all" ? outbox : outbox.filter((row) => row.state === outboxFilter);
   const memosCard = cards.find((card) => card.id === "memos");
   const aiCard = cards.find((card) => card.id === "ai");
@@ -400,22 +305,28 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
   const aiPrivacyText = PRIVACY_LABEL[aiPrivacy] ?? aiPrivacy;
 
   return (
-    <div className="settings-page">
-      <header className="page-head">
-        <h1>集成</h1>
+    <div className={embedded ? "integration-embedded" : "settings-page"}>
+      {!embedded && <header className="page-head">
+        <h1>{focusPlugin ? cards.find(p=>p.id===focusPlugin)?.name : "插件管理"}</h1>
         <p>核心功能无需任何集成 · 未启用的插件不产生任何联网请求</p>
-      </header>
+      </header>}
 
+      {!focusPlugin && <LocalPluginManager />}
       <section className="settings-group">
-        <h2>插件</h2>
-        {cards.length === 0 ? (
+        <div className="plugin-manager-actions"><h2>{embedded ? (focusPlugin === "ai" ? "连接设置" : "历史数据") : focusPlugin ? "插件设置" : "已添加的插件"}</h2><button className="primary-btn primary-btn--sm" type="button" hidden={!!focusPlugin} onClick={() => setCatalogOpen((v) => !v)}>{catalogOpen ? "收起插件目录" : "＋ 添加插件"}</button></div>
+        {catalogOpen && <div className="plugin-catalog">
+          <h3>插件目录</h3><p>选择需要的功能，添加后单独配置与启用。移除会停止插件，保留配置便于重新添加。</p>
+          {available.length === 0 ? <p>目录中的插件均已添加。</p> : available.map((card) => <div key={card.id} className="setting-row"><div><strong>{integrationName(card)}</strong><p>{card.capabilities.map((cap) => CAPABILITY_LABEL[cap]).join(" · ")}</p></div><button type="button" className="ghost-btn" disabled={busy !== null} onClick={() => void changeInstallation(card, true)}>添加</button></div>)}
+          <p className="modal__hint">内置插件在此添加；本地扩展请使用上方“从本地安装”。MCP服务暂不支持。</p>
+        </div>}
+        {installed.length === 0 ? (
           <p className="panel__empty">还没有可用插件，所有数据都保存在本机</p>
         ) : (
-          cards.map((card) => (
+          installed.map((card) => (
             <div key={card.id} className="integration-card">
               <div className="integration-card__head">
                 <div className="integration-card__title">
-                  <strong>{card.name}</strong>
+                  <strong>{integrationName(card)}</strong>
                   <span className="integration-card__version">v{card.version}</span>
                   <span
                     className={`outbox-badge outbox-badge--${card.enabled ? (card.configured ? "done" : "pending") : "off"}`}
@@ -423,21 +334,24 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
                     {card.enabled ? (card.configured ? "已配置" : "待配置") : "未启用"}
                   </span>
                 </div>
+                <div className="plugin-manager-actions">
+                <button type="button" className="ghost-btn" disabled={busy !== null} onClick={() => void changeInstallation(card, false)}>移除</button>
                 <label className="switch">
                   <input
                     type="checkbox"
                     checked={card.enabled}
                     disabled={busy !== null}
-                    aria-label={`启用 ${card.name}`}
+                    aria-label={`启用 ${integrationName(card)}`}
                     onChange={(event) => void toggleEnabled(card, event.target.checked)}
                   />
                   <span className="switch__track" aria-hidden="true" />
                 </label>
+                </div>
               </div>
 
               <p className="integration-card__desc">
                 {card.id === "memos"
-                  ? "记录关闭后自动发布为 Memos 日记，幂等重试，不打断打点。"
+                  ? "记录关闭后延迟发布最新内容，允许补写与撤销。侧边 Memos 共用此处的实例地址与 Access Token，无需再次登录。"
                   : card.id === "ai"
                     ? "用本地或 OpenAI 兼容服务整理标题与分类，建议需逐条确认。"
                     : card.id === "tomatodo"
@@ -523,7 +437,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
                   <div className="setting-row" style={{ borderTop: 0, paddingBottom: 0 }}>
                     <div className="setting-row__text">
                       <label>包含备注</label>
-                      <p>默认只发布标题与时间，开启后附带备注全文</p>
+                      <p>发布包含标题、分类、标签、专注状态、有效时长和暂停合计的完整记录；此开关决定是否附带备注全文。</p>
                     </div>
                     <label className="switch">
                       <input
@@ -585,7 +499,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
                         value={aiPrivacy}
                         onChange={(event) => setAiPrivacy(event.target.value)}
                       >
-                        <option value="title_only">仅标题与时间</option>
+                        <option value="title_only">标题、时间与分类标签</option>
                         <option value="with_note">含备注全文</option>
                         <option value="off">不联网</option>
                       </select>
@@ -624,6 +538,11 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
                     <small>存入系统钥匙串，不会写入数据库或日志</small>
                   </label>
                   <div className="integration-actions">
+                    <button className="ghost-btn" type="button" disabled={busy!==null||aiPrivacy==="off"} onClick={()=>void loadAiModels()}>{busy==="ai-models"?"读取中…":"读取可用模型"}</button>
+                    {aiModels.length>0&&<select aria-label="可用模型" className="field__input ai-model-select" value={aiModels.includes(aiModel)?aiModel:""} onChange={e=>setAiModel(e.target.value)}><option value="" disabled>选择模型后点击保存</option>{aiModels.map(model=><option key={model} value={model}>{model}</option>)}</select>}
+                  </div>
+                  <p className="modal__hint">先保存服务地址和密钥，再读取模型列表或测试连接；不支持列出模型的服务可手动填写模型 ID。</p>
+                  <div className="integration-actions">
                     <button
                       type="button"
                       className="ghost-btn"
@@ -645,213 +564,15 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
                 </div>
               )}
 
-              {card.enabled && card.id === "tomatodo" && (
-                <div className="integration-card__form">
-                  <div className="integration-actions">
-                    <button
-                      type="button"
-                      className="ghost-btn"
-                      disabled={tomatodoBusy !== null}
-                      onClick={() => void scanTomatodo()}
-                    >
-                      {tomatodoBusy === "scan" ? "扫描中…" : "扫描"}
-                    </button>
-                    <button
-                      type="button"
-                      className="primary-btn primary-btn--sm"
-                      disabled={tomatodoBusy !== null}
-                      onClick={() => void importTomatodo()}
-                    >
-                      {tomatodoBusy === "import" ? "导入中…" : "导入"}
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-btn"
-                      disabled={tomatodoBusy !== null}
-                      onClick={() => void compareTomatodo()}
-                    >
-                      {tomatodoBusy === "compare" ? "对比中…" : "对比"}
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-btn"
-                      disabled={tomatodoBusy !== null || !aiCard?.enabled}
-                      onClick={() => void analyzeTomatodo()}
-                      title={aiCard?.enabled ? "" : "需先启用 AI 助手"}
-                    >
-                      {tomatodoBusy === "analyze" ? "分析中…" : "智能分析"}
-                    </button>
-                  </div>
 
-                  {tomatodoScan && (
-                    <div className="tomatodo-panel">
-                      <div className="tomatodo-stats">
-                        <span>专注记录 {tomatodoScan.completedRecords}/{tomatodoScan.totalRecords} 条</span>
-                        <span>共 {tomatodoScan.totalMinutes} 分钟</span>
-                        <span>待办 {tomatodoScan.todoCount} 条</span>
-                      </div>
-                      <div className="tomatodo-preview">
-                        {tomatodoScan.preview.map((item) => (
-                          <div key={item.id} className="tomatodo-preview__row">
-                            <span className="tomatodo-preview__name">{item.name}</span>
-                            <span className="tomatodo-preview__time">
-                              {item.startText}–{item.endText}
-                            </span>
-                            <span className="tomatodo-preview__dur">{item.durationMinutes}min</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {tomatodoImport && (
-                    <div className="tomatodo-import-result">
-                      导入结果：成功 {tomatodoImport.imported} · 跳过 {tomatodoImport.skippedExisting} ·
-                      忽略未完成 {tomatodoImport.skippedIncomplete} · 冲突 {tomatodoImport.conflicts}
-                      {tomatodoImport.errors.length > 0 && (
-                        <ul>
-                          {tomatodoImport.errors.map((err, i) => (
-                            <li key={i}>{err}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-
-                  {tomatodoCompare && (
-                    <div className="tomatodo-compare">
-                      <div className="tomatodo-stats">
-                        <span>番茄Todo {tomatodoCompare.summary.tomatodoMinutes}min</span>
-                        <span>DotLog {tomatodoCompare.summary.dotlogMinutes}min</span>
-                        <span>匹配 {tomatodoCompare.summary.matchedPairs} 对</span>
-                        <span>DotLog 缺 {tomatodoCompare.summary.missingInDotlog}</span>
-                        <span>DotLog 多 {tomatodoCompare.summary.extraInDotlog}</span>
-                      </div>
-                      <div className="tomatodo-compare__list">
-                        {tomatodoCompare.pairs.map((pair, idx) => (
-                          <div key={idx} className="tomatodo-compare__row">
-                            <div className="tomatodo-compare__left">
-                              {pair.tomatodo ? (
-                                <>
-                                  <strong>{pair.tomatodo.name}</strong>
-                                  <span>{pair.tomatodo.durationMinutes}min · {pair.tomatodo.startText}</span>
-                                </>
-                              ) : (
-                                <span className="tomatodo-compare__none">番茄Todo 无记录</span>
-                              )}
-                            </div>
-                            <div className="tomatodo-compare__coverage">
-                              覆盖 {pair.coveragePercent}%
-                            </div>
-                            <div className="tomatodo-compare__right">
-                              {pair.dotlogSegments.length > 0 ? (
-                                pair.dotlogSegments.map((seg) => (
-                                  <span key={seg.id} className="tomatodo-compare__seg">
-                                    {seg.title}
-                                    {seg.categoryName && `（${seg.categoryName}）`}
-                                  </span>
-                                ))
-                              ) : (
-                                <span className="tomatodo-compare__none">DotLog 无记录</span>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {tomatodoAnalysis && (
-                    <div className="tomatodo-analysis">
-                      {tomatodoAnalysis.length === 0 ? (
-                        <p className="panel__empty">暂无可分析的配对</p>
-                      ) : (
-                        <ul className="tomatodo-analysis__list">
-                          {tomatodoAnalysis.map((item) => (
-                            <li key={item.pairIndex} className="tomatodo-analysis__item">
-                              <div className="tomatodo-analysis__subject">
-                                <strong>{item.tomatodoSubject}</strong>
-                                {item.dotlogSummary && <span>→ {item.dotlogSummary}</span>}
-                              </div>
-                              <p className="tomatodo-analysis__suggestion">{item.suggestion}</p>
-                              <p className="tomatodo-analysis__reason">{item.reason}</p>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           ))
         )}
       </section>
 
-      {aiCard?.enabled && (
-        <section className="settings-group">
-          <h2>AI 整理建议</h2>
-          <div className="setting-row setting-row--stack">
-            <div className="setting-row__text">
-              <label>整理今天的记录</label>
-              <p>
-                仅发送标题与起止时间（隐私模式：{aiPrivacyText}）；建议只在确认后写入记录。
-              </p>
-            </div>
-            <div className="settings-actions">
-              <button
-                type="button"
-                className="primary-btn primary-btn--sm"
-                disabled={aiBusy || busy !== null}
-                onClick={() => void loadSuggestions()}
-              >
-                {aiBusy ? "分析中…" : "获取建议"}
-              </button>
-            </div>
-          </div>
+      {!focusPlugin && aiCard?.enabled && <section className="settings-group ai-section"><h2>AI 工作台</h2><p>按日期整理记录，编辑后逐条采纳；生成日/周复盘，或围绕所选时间提问。</p><button className="primary-btn primary-btn--sm" onClick={()=>window.dispatchEvent(new CustomEvent("dotlog:open-plugin",{detail:"ai"}))}>打开 AI 工作台</button></section>}
 
-          {suggestions.length > 0 && (
-            <ul className="ai-suggest">
-              {suggestions.map(({ suggestion, segment }) => (
-                <li key={suggestion.segmentId} className="ai-suggest__item">
-                  <div className="ai-suggest__time">
-                    {formatClock(segment.startAt)}–{formatClock(segment.endAt ?? Date.now())}
-                  </div>
-                  <div className="ai-suggest__body">
-                    <div className="ai-suggest__titles">
-                      <span className="ai-suggest__old">{segment.title || "未命名"}</span>
-                      {suggestion.title && suggestion.title !== segment.title && (
-                        <>
-                          <span aria-hidden="true">→</span>
-                          <span className="ai-suggest__new">{suggestion.title}</span>
-                        </>
-                      )}
-                    </div>
-                    <div className="ai-suggest__tags">
-                      {suggestion.tags.map((tag) => (
-                        <span key={tag} className="tag-chip">
-                          #{tag}
-                        </span>
-                      ))}
-                      <span className="ai-suggest__reason">{suggestion.reason}</span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="ghost-btn"
-                    disabled={busy !== null}
-                    onClick={() => void applySuggestion({ suggestion, segment })}
-                  >
-                    应用
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
-
-      <section className="settings-group">
+      {!focusPlugin && <section className="settings-group">
         <h2>发布队列</h2>
         <div className="outbox-filters" role="group" aria-label="按状态筛选">
           {OUTBOX_FILTERS.map((filter) => (
@@ -907,20 +628,20 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
             ))}
           </div>
         )}
-      </section>
+      </section>}
 
-      <section className="settings-group">
+      {!focusPlugin && <section className="settings-group">
         <h2>隐私</h2>
         <div className="setting-row">
           <div className="setting-row__text">
             <label>联网范围</label>
             <p>
-              只在记录关闭后入队发送；请求域名受插件清单白名单限制；密钥只存系统钥匙串。AI 建议需手动触发，确认后才写回记录。
+              Memos 浏览与编辑按你的操作请求实例，自动发布受配置控制。请求仅发往配置的服务，跨站重定向被拒绝；令牌只存系统钥匙串。AI 建议需手动触发并确认后写回。
             </p>
           </div>
           <span className="badge">{cards.some((card) => card.enabled) ? "部分启用" : "未启用"}</span>
         </div>
-      </section>
+      </section>}
 
       {confirmEnable && (
         <div className="modal-backdrop" onClick={() => setConfirmEnable(null)}>
@@ -934,8 +655,7 @@ export function IntegrationsPage({ onNotify, onDataChanged }: IntegrationsPagePr
               <strong>启用 {confirmEnable.name}？</strong>
             </div>
             <p className="modal__hint">
-              启用后，每次记录关闭时会向该服务发送：标题、起止时间、分类与标签
-              {confirmEnable.id === "ai" ? "（AI 助手仅在手动获取建议时联网）" : ""}。密钥存入系统钥匙串，本地记录始终保留完整副本。
+              {confirmEnable.id === "memos" ? "允许侧边 Memos 使用令牌读取和编辑远端记录。自动发布默认关闭，开启后发送标题、分类、标签、专注状态、时间与暂停汇总，备注由包含备注开关控制。" : "AI 仅在手动获取建议时发送隐私模式允许的字段；建议须确认后写入。"} 密钥存入系统钥匙串，本地时间记录保留在本机。
             </p>
             <div className="modal__foot">
               <div className="modal__actions">

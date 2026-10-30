@@ -2,8 +2,8 @@
 //!
 //! 数据库只保存覆盖值；应用 scope 的读取结果是「默认值 ⊕ 覆盖值」。
 
-use serde_json::{Map, Value};
 use dotlog_domain::DayPolicy;
+use serde_json::{Map, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::ports::{Clock, TimerStore};
@@ -28,6 +28,7 @@ pub fn default_settings() -> Map<String, Value> {
     map.insert("notify.on_punch".into(), Value::from(true));
     map.insert("launch.at_login".into(), Value::from(false));
     map.insert("ui.theme".into(), Value::from("system"));
+    map.insert("ui.motion".into(), Value::from("system"));
     map.insert("backup.enabled".into(), Value::from(true));
     map.insert("backup.keep_daily".into(), Value::from(7));
     map.insert("backup.keep_weekly".into(), Value::from(4));
@@ -68,6 +69,12 @@ pub fn day_policy_of(settings: &Value) -> DayPolicy {
 /// 校验单个设置项；`app` scope 的键必须已知且取值合法。
 pub fn validate_entry(scope: &str, key: &str, value: &Value) -> AppResult<()> {
     if scope != APP_SCOPE {
+        if ["token", "apiKey", "api_key", "password", "secret"].contains(&key) {
+            return Err(AppError::store(
+                "E_SETTING_INVALID",
+                "敏感凭据必须使用系统钥匙串接口",
+            ));
+        }
         return Ok(());
     }
     let invalid = || AppError::store("E_SETTING_INVALID", format!("设置项 {key} 的值非法"));
@@ -100,8 +107,15 @@ pub fn validate_entry(scope: &str, key: &str, value: &Value) -> AppResult<()> {
         "notify.on_punch" | "launch.at_login" | "backup.enabled" => {
             value.is_boolean().then_some(()).ok_or_else(invalid)
         }
+        "ui.motion" => match value.as_str() {
+            Some("system" | "reduced") => Ok(()),
+            _ => Err(invalid()),
+        },
         "ui.theme" => match value.as_str() {
-            Some("light") | Some("dark") | Some("system") => Ok(()),
+            Some(
+                "light" | "dark" | "system" | "paper" | "forest" | "ocean" | "lavender" | "rose"
+                | "grid" | "folio" | "console" | "glass",
+            ) => Ok(()),
             _ => Err(invalid()),
         },
         "backup.keep_daily" | "backup.keep_weekly" | "backup.keep_monthly" => {
@@ -150,8 +164,7 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
         let rows: Vec<(String, String)> = entries
             .into_iter()
             .map(|(key, value)| {
-                let raw = serde_json::to_string(&value)
-                    .unwrap_or_else(|_| "null".to_string());
+                let raw = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
                 (key, raw)
             })
             .collect();

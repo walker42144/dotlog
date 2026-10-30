@@ -10,6 +10,7 @@ dotlog-domain = { path = "../domain" }
 dotlog-application = { path = "../application" }
 rusqlite.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

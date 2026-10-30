@@ -23,6 +23,7 @@ struct ParsedRow {
     title: String,
     note: String,
     category_name: Option<String>,
+    tags: Vec<String>,
     is_focus: bool,
     is_ignored: bool,
     status: &'static str,
@@ -37,6 +38,7 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
 
     /// `import_commit`：写入 `ok` 行；冲突与非法行跳过。
     pub fn import_commit(&self, content: &str) -> AppResult<ImportResultView> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let analysis = self.analyze_import(content)?;
         let tz = self.clock.now().tz_offset_min;
         let now_ms = self.clock.now().utc_ms;
@@ -58,7 +60,7 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
                 end_at_ms: Some(row.end_at),
                 title: row.title.clone(),
                 note: row.note.clone(),
-                tags: Vec::new(),
+                tags: row.tags.clone(),
                 category_id,
                 is_focus: row.is_focus,
                 is_ignored: row.is_ignored,
@@ -128,7 +130,14 @@ impl<S: TimerStore, C: Clock> TimerService<S, C> {
         for row in &mut rows {
             let mut conflict_ids: Vec<String> = existing
                 .iter()
-                .filter(|segment| overlaps(segment.start_at_ms, segment.end_at_ms, row.start_at, row.end_at))
+                .filter(|segment| {
+                    overlaps(
+                        segment.start_at_ms,
+                        segment.end_at_ms,
+                        row.start_at,
+                        row.end_at,
+                    )
+                })
                 .map(|segment| segment.id.clone())
                 .collect();
             let mut row_conflict = !conflict_ids.is_empty();
@@ -201,6 +210,7 @@ struct HeaderColumns {
     end: usize,
     title: Option<usize>,
     category: Option<usize>,
+    tags: Option<usize>,
     note: Option<usize>,
     is_focus: Option<usize>,
     is_ignored: Option<usize>,
@@ -213,9 +223,10 @@ impl HeaderColumns {
             index.insert(name.trim().to_ascii_lowercase(), position);
         }
         let required = |name: &str| {
-            index.get(name).copied().ok_or_else(|| {
-                AppError::store("E_INVALID_RANGE", format!("CSV 缺少必需列 {name}"))
-            })
+            index
+                .get(name)
+                .copied()
+                .ok_or_else(|| AppError::store("E_INVALID_RANGE", format!("CSV 缺少必需列 {name}")))
         };
         Ok(Self {
             date: index.get("date").copied(),
@@ -223,6 +234,7 @@ impl HeaderColumns {
             end: required("end")?,
             title: index.get("title").copied(),
             category: index.get("category").copied(),
+            tags: index.get("tags").copied(),
             note: index.get("note").copied(),
             is_focus: index.get("is_focus").copied(),
             is_ignored: index.get("is_ignored").copied(),
@@ -262,6 +274,11 @@ impl HeaderColumns {
             title: field(self.title),
             note: field(self.note),
             category_name: Some(field(self.category)).filter(|value| !value.is_empty()),
+            tags: field(self.tags)
+                .split(';')
+                .map(|s| s.trim().trim_start_matches('#').to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             is_focus: truthy(&field(self.is_focus)),
             is_ignored: truthy(&field(self.is_ignored)),
             status: "ok",
