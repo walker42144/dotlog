@@ -1,5 +1,5 @@
 import { AiAssistantPage } from "./components/AiAssistantPage";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PluginPage } from "./components/PluginPage";
 import { localPlugins, PLUGINS_CHANGED, type LocalPlugin } from "./lib/plugins";
 import { CommandPalette } from "./components/CommandPalette";
@@ -58,6 +58,9 @@ export default function App() {
     try { return parseThemePreference(localStorage.getItem("dotlog.theme")); } catch { return "system"; }
   });
   const mainRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (mainRef.current) mainRef.current.scrollTop = 0;
+  }, [page]);
   const [motion, setMotion] = useState(() => document.documentElement.dataset.motion === "reduced" ? "reduced" : "system");
   useEffect(() => {
     document.documentElement.dataset.motion = motion;

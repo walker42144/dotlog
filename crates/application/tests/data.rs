@@ -254,7 +254,7 @@ fn themes_round_trip_through_settings_and_reject_unknown_values() {
     let service = service(FakeStore::default());
     for theme in [
         "system", "light", "dark", "paper", "forest", "ocean", "lavender", "rose", "grid", "folio",
-        "console", "glass",
+        "console", "glass", "acrylic", "obsidian", "ceramic",
     ] {
         service
             .settings_patch("app", vec![("ui.theme".into(), serde_json::json!(theme))])
@@ -271,7 +271,7 @@ fn themes_round_trip_through_settings_and_reject_unknown_values() {
             .code(),
         "E_SETTING_INVALID"
     );
-    assert_eq!(service.settings(Some("app")).unwrap()["ui.theme"], "glass");
+    assert_eq!(service.settings(Some("app")).unwrap()["ui.theme"], "ceramic");
 }
 
 #[test]

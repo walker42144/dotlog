@@ -6,6 +6,7 @@ import "./styles/app.css";
 import "./styles/desktop.css";
 import "./styles/skins.css";
 import "./styles/motion.css";
+import "./styles/materials.css";
 
 const container = document.getElementById("root");
 if (!container) {
