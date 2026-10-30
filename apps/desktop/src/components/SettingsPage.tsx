@@ -543,7 +543,7 @@ export function SettingsPage({
             <label>版本</label>
             <p>数据目录：%APPDATA%\dotlog · 备份与导出在各自子目录。</p>
           </div>
-          <span className="settings-version">v0.1.18</span>
+          <span className="settings-version">v0.1.19</span>
         </div>
         <div className="setting-row">
           <div className="setting-row__text">

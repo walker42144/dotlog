@@ -3,6 +3,7 @@
   --radius: 6px;
   --radius-card: 8px;
   --sidebar-w: 200px;
+  --aside-w: 304px;
   --text-xl: 32px;
   --shadow-card: none;
 }
@@ -37,6 +38,7 @@
 .status-card__hint { font-size: 12px; }
 .elapsed { font-size: 32px; font-variant-numeric: tabular-nums; }
 .elapsed--idle { font-size: 20px; }
+.stats { padding-left: 24px; }
 .stats > .panel { padding: 16px 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; box-shadow: none; }
 .status-card__sub { font-size: 12px; }
 .integration-card { padding: 18px 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; box-shadow: none; background: transparent; }
